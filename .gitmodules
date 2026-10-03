@@ -1,0 +1,3 @@
+[submodule "wallet"]
+	path = wallet
+	url = https://github.com/karlsencoin/karlsen-web-wallet.git
