@@ -1,0 +1,10 @@
+node_modules/
+ui/dist/
+ui/public/wallet/
+ui/public/karlsen-wasm/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/karlsend-*
+.env
+*.env
+*.toml.local

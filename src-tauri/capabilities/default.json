@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window capabilities",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://karlsencoin.org/*" },
+        { "url": "https://kgi.karlsencoin.org/*" },
+        { "url": "https://explorer.karlsencoin.org/*" },
+        { "url": "https://wallet.karlsencoin.org/*" },
+        { "url": "https://github.com/karlsencoin/*" }
+      ]
+    }
+  ]
+}
