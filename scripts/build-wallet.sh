@@ -17,9 +17,14 @@ WALLET=wallet
   VITE_PUBLIC_NODE_URLS="wss://wallet.karlsencoin.org/wrpc" \
   VITE_FEATURE_BRIDGE="true" \
   VITE_BRIDGE_API_URL="https://wallet.karlsencoin.org/bridge-api" \
+  VITE_LEGACY_WALLET_URL="https://wallet.karlsencoin.org/legacy" \
     npx vite build --base=/wallet/ --outDir ../ui/public/wallet --emptyOutDir
 )
 
+# The SDK is built from rusty-karlsen and not committed to the wallet repo (.gitignore).
+# Point KARLSEN_WASM_DIR at a built karlsen-wasm folder (karlsen.js + karlsen_bg.wasm).
+SDK_DIR="${KARLSEN_WASM_DIR:-$WALLET/public/karlsen-wasm}"
+[[ -f "$SDK_DIR/karlsen_bg.wasm" ]] || { echo "Karlsen WASM SDK not found in $SDK_DIR (set KARLSEN_WASM_DIR)" >&2; exit 1; }
 rm -rf ui/public/karlsen-wasm
-cp -r "$WALLET/public/karlsen-wasm" ui/public/karlsen-wasm
+cp -r "$SDK_DIR" ui/public/karlsen-wasm
 echo "wallet + SDK copied into ui/public/"

@@ -13,7 +13,9 @@
         { "url": "https://kgi.karlsencoin.org/*" },
         { "url": "https://explorer.karlsencoin.org/*" },
         { "url": "https://wallet.karlsencoin.org/*" },
-        { "url": "https://github.com/karlsencoin/*" }
+        { "url": "https://github.com/karlsencoin/*" },
+        { "url": "https://phantom.app/*" },
+        { "url": "https://explorer.solana.com/*" }
       ]
     }
   ]

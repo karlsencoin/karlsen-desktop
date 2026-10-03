@@ -3,6 +3,7 @@ import { backend, type NodeStatus, type Settings } from "./backend";
 import { Dashboard } from "./Dashboard";
 import { LogConsole } from "./LogConsole";
 import { SettingsPage } from "./SettingsPage";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 type Tab = "karlsen" | "wallet" | "settings" | "karlsend";
 
@@ -12,6 +13,34 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "settings", label: "SETTINGS" },
   { id: "karlsend", label: "KARLSEND" },
 ];
+
+/**
+ * The embedded wallet is same-origin, so its clicks can be observed from here. The Tauri webview
+ * does not open new windows, so links that leave the app (explorer, Phantom, legacy wallet) are
+ * handed to the system browser instead. Only http(s) URLs on another origin are intercepted.
+ */
+function routeExternalLinks(frame: HTMLIFrameElement) {
+  const doc = frame.contentDocument;
+  if (!doc) return;
+  doc.addEventListener(
+    "click",
+    (e) => {
+      const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!a) return;
+      let url: URL;
+      try {
+        url = new URL(a.href, doc.baseURI);
+      } catch {
+        return;
+      }
+      if ((url.protocol === "https:" || url.protocol === "http:") && url.origin !== window.location.origin) {
+        e.preventDefault();
+        void openUrl(url.toString()).catch((err) => console.warn("openUrl refused", url.toString(), err));
+      }
+    },
+    true,
+  );
+}
 
 /** Turn a listen address (e.g. 0.0.0.0:43110) into a local ws:// URL. */
 function wsUrl(listen: string): string {
@@ -59,6 +88,7 @@ export function App() {
             title="Karlsen Wallet"
             className="wallet-frame"
             style={{ display: tab === "wallet" ? "block" : "none" }}
+            onLoad={(e) => routeExternalLinks(e.currentTarget)}
             src={`/wallet/index.html?node=${encodeURIComponent(rpcUrl)}`}
           />
         )}
