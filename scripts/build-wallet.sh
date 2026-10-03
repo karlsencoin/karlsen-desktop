@@ -16,7 +16,7 @@ WALLET=wallet
   # node and the bridge API are given as absolute URLs (allowed by the CSP in tauri.conf.json).
   VITE_PUBLIC_NODE_URLS="wss://wallet.karlsencoin.org/wrpc" \
   VITE_FEATURE_BRIDGE="true" \
-  VITE_BRIDGE_API_URL="https://wallet.karlsencoin.org/bridge-api/v1" \
+  VITE_BRIDGE_API_URL="https://wallet.karlsencoin.org/bridge-api" \
     npx vite build --base=/wallet/ --outDir ../ui/public/wallet --emptyOutDir
 )
 
