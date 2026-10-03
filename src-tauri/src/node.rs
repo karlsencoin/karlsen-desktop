@@ -280,8 +280,10 @@ impl NodeManager {
             (g.data_dir.clone(), g.args.clone(), g.auto_restart)
         };
         self.stop(app).await?;
-        // Only remove the network subdirectory, never the whole user-chosen folder.
-        let chain_dir = data_dir.join("karlsen-mainnet");
+        // Layout (verified on karlsend 3.3.0): <appdir>/karlsen-mainnet/{datadir,logs}.
+        // Only remove the chain database; keep logs so pre-resync issues stay inspectable.
+        // Never touch the user-chosen root folder.
+        let chain_dir = data_dir.join("karlsen-mainnet").join("datadir");
         if chain_dir.exists() {
             self.push_log(app, format!("DESKTOP: deleting {}", chain_dir.display()));
             std::fs::remove_dir_all(&chain_dir)?;

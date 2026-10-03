@@ -22,6 +22,11 @@ pub struct Settings {
     pub p2p_listen: String,
     pub upnp_enabled: bool,
     pub utxo_index: bool,
+    /// Peers passed as --addpeer so a fresh node finds the network immediately,
+    /// even when DNS seeders are slow or unreachable. Discovery still adds others.
+    /// Entries may be "host:port" (resolved by the app at node start, because
+    /// karlsend --addpeer only accepts IP addresses) or "ip:port".
+    pub bootstrap_peers: Vec<String>,
     /// Keep running in the system tray when the window is closed.
     pub run_in_background: bool,
     /// Extra raw arguments appended to the karlsend command line.
@@ -39,6 +44,12 @@ impl Default for Settings {
             p2p_listen: "0.0.0.0:42111".into(),
             upnp_enabled: false,
             utxo_index: true,
+            bootstrap_peers: vec![
+                // DNS name first so a VPS move only needs a DNS update; the raw IP is a
+                // fallback for when the name does not resolve (DNS outage, record missing).
+                "p2p.karlsencoin.org:42111".into(),
+                "72.62.146.74:42111".into(),
+            ],
             run_in_background: false,
             extra_args: Vec::new(),
         }
@@ -84,10 +95,51 @@ impl Settings {
         if self.utxo_index {
             args.push("--utxoindex".into());
         }
+        for peer in resolve_peers(&self.bootstrap_peers) {
+            args.push(format!("--addpeer={peer}"));
+        }
         if !self.upnp_enabled {
             args.push("--disable-upnp".into());
         }
         args.extend(self.extra_args.iter().cloned());
         args
+    }
+}
+
+/// Turn "host:port" / "ip:port" entries into unique "ip:port" strings for --addpeer.
+/// Unresolvable entries are skipped: bootstrap peers only speed up the first connection,
+/// the node still finds the network through its built-in DNS seeders without them.
+/// Blocking (DNS lookup); call from a blocking context.
+pub fn resolve_peers(entries: &[String]) -> Vec<String> {
+    use std::net::{SocketAddr, ToSocketAddrs};
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+        let addrs: Vec<SocketAddr> = match entry.parse::<SocketAddr>() {
+            Ok(a) => vec![a],
+            Err(_) => entry.to_socket_addrs().map(|it| it.collect()).unwrap_or_default(),
+        };
+        for a in addrs {
+            let s = a.to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_peers_keeps_ips_dedups_and_skips_bad_names() {
+        let peers = vec![
+            "72.62.146.74:42111".to_string(),
+            " 72.62.146.74:42111 ".to_string(),
+            "no-such-host.invalid:42111".to_string(),
+            "".to_string(),
+        ];
+        assert_eq!(resolve_peers(&peers), vec!["72.62.146.74:42111".to_string()]);
     }
 }

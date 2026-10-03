@@ -37,7 +37,7 @@ Requirements: Rust stable, Node 20+, Tauri 2 system deps
 ```bash
 git clone --recursive https://github.com/karlsencoin/karlsen-desktop
 cd karlsen-desktop
-scripts/fetch-karlsend.sh /path/to/karlsend    # or KARLSEND_URL=<v3.3.1 release asset>
+scripts/fetch-karlsend.sh /path/to/karlsend    # or KARLSEND_URL=<rusty-karlsen v3.3.1 release asset; binary reports "karlsend 3.3.0">
 scripts/build-wallet.sh
 npm --prefix ui ci
 cargo install tauri-cli --version "^2" --locked

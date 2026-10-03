@@ -27,7 +27,11 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 async fn start_node_from_settings(app: &AppHandle, state: &AppState) -> anyhow::Result<()> {
     let s = state.settings.lock().await.clone();
     let data_dir = s.resolved_data_dir(&state.default_data_dir);
-    let args = s.node_args(&data_dir);
+    // node_args resolves bootstrap peer host names (blocking DNS), keep it off the async runtime.
+    let args = {
+        let (s, dir) = (s.clone(), data_dir.clone());
+        tokio::task::spawn_blocking(move || s.node_args(&dir)).await?
+    };
     state.node.start(app, data_dir, args, s.auto_restart_node).await
 }
 

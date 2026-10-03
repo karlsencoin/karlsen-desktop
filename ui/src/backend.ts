@@ -22,6 +22,7 @@ export interface Settings {
   p2pListen: string;
   upnpEnabled: boolean;
   utxoIndex: boolean;
+  bootstrapPeers: string[];
   runInBackground: boolean;
   extraArgs: string[];
 }

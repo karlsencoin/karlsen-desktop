@@ -52,6 +52,8 @@ export function SettingsPage({ status, onSaved }: { status: NodeStatus | null; o
           <span>gRPC</span><input value={s.rpcListen} onChange={(e) => set("rpcListen", e.target.value)} />
           <span>wRPC (Borsh)</span><input value={s.rpcListenBorsh} onChange={(e) => set("rpcListenBorsh", e.target.value)} />
           <span>P2P</span><input value={s.p2pListen} onChange={(e) => set("p2pListen", e.target.value)} />
+          <span>Bootstrap peers</span>
+          <input value={s.bootstrapPeers.join(" ")} onChange={(e) => set("bootstrapPeers", e.target.value.split(/[\s,]+/).filter(Boolean))} />
           <span>Extra arguments</span>
           <input value={s.extraArgs.join(" ")} onChange={(e) => set("extraArgs", e.target.value.split(/\s+/).filter(Boolean))} />
         </div>

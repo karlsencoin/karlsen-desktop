@@ -29,7 +29,7 @@ elif [[ -n "${KARLSEND_URL:-}" ]]; then
   [[ -n "$BIN" ]] || { echo "karlsend${EXT} not found in archive" >&2; exit 1; }
   cp "$BIN" "$DEST"
 else
-  echo "Give a local karlsend path or set KARLSEND_URL (rusty-karlsen v3.3.1 release asset)." >&2
+  echo "Give a local karlsend path or set KARLSEND_URL (rusty-karlsen v3.3.1 release asset; its binary reports \"karlsend 3.3.0\")." >&2
   exit 1
 fi
 
