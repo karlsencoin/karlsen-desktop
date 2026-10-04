@@ -5,7 +5,8 @@ import { NodeRpc, type ChainInfo, type NodeMetrics } from "./rpc";
 import {
   formatDifficulty,
   formatDuration,
-  formatFeeBucket,
+  formatFeeRate,
+  formatFeeTime,
   formatHashrate,
   formatInt,
   formatKls,
@@ -32,11 +33,12 @@ export const LINKS = [
   { label: "Source Code", url: "https://github.com/karlsencoin" },
 ];
 
-function Tile({ label, value, title }: { label: string; value: string; title?: string }) {
+function Tile({ label, value, title, sub }: { label: string; value: string; title?: string; sub?: string }) {
   return (
-    <div className="tile" title={title ?? value}>
+    <div className="tile" title={title ?? (sub ? `${value} · ${sub}` : value)}>
       <div className="tile-label">{label}</div>
       <div className="tile-value">{value}</div>
+      {sub && <div className="tile-sub">{sub}</div>}
     </div>
   );
 }
@@ -221,9 +223,9 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
       <section>
         <h2>Transaction Fee Estimates</h2>
         <div className="tiles">
-          <Tile label="Priority Fee Rate" value={chain ? formatFeeBucket(chain.priorityFee) : "—"} />
-          <Tile label="Normal Fee Rate" value={chain ? formatFeeBucket(chain.normalFee) : "—"} />
-          <Tile label="Low Fee Rate" value={chain ? formatFeeBucket(chain.lowFee) : "—"} />
+          <Tile label="Priority Fee Rate" value={chain ? formatFeeRate(chain.priorityFee) : "—"} sub={chain ? formatFeeTime(chain.priorityFee) : undefined} />
+          <Tile label="Normal Fee Rate" value={chain ? formatFeeRate(chain.normalFee) : "—"} sub={chain ? formatFeeTime(chain.normalFee) : undefined} />
+          <Tile label="Low Fee Rate" value={chain ? formatFeeRate(chain.lowFee) : "—"} sub={chain ? formatFeeTime(chain.lowFee) : undefined} />
         </div>
         <div className="help">Fee = fee rate × transaction mass (grams). A simple one-input, two-output transfer is a few thousand grams.</div>
       </section>

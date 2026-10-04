@@ -58,3 +58,4 @@ input.wide { width: 100%; }
 .tips { list-style: none; padding: 0; margin: 0; font-family: monospace; font-size: 13px; line-height: 1.7; }
 .tips a { color: var(--accent); text-decoration: none; word-break: break-all; }
 .tips a:hover { text-decoration: underline; }
+.tile-sub { text-align: right; font-size: 11px; color: var(--muted); margin-top: 2px; }

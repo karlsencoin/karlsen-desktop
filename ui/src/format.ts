@@ -76,9 +76,13 @@ export function formatDuration(secs: number): string {
   return plural(Math.max(0, Math.round(secs)), "second");
 }
 
-/** Fee bucket as "1.00 sompi/gram · ~1 second". */
-export function formatFeeBucket(b: { feerate: number; estimatedSeconds: number } | null): string {
-  if (!b) return "N/A";
-  const t = b.estimatedSeconds < 1 ? "< 1 second" : `~${formatDuration(b.estimatedSeconds)}`;
-  return `${b.feerate.toFixed(2)} sompi/gram · ${t}`;
+/** Fee rate of a bucket, e.g. "1.00 sompi/gram". */
+export function formatFeeRate(b: { feerate: number } | null): string {
+  return b ? `${b.feerate.toFixed(2)} sompi/gram` : "N/A";
+}
+
+/** Expected inclusion time of a bucket, e.g. "Inclusion in under 1 second". */
+export function formatFeeTime(b: { estimatedSeconds: number } | null): string | undefined {
+  if (!b) return undefined;
+  return b.estimatedSeconds < 1 ? "Inclusion in under 1 second" : `Inclusion in ~${formatDuration(b.estimatedSeconds)}`;
 }
