@@ -46,6 +46,25 @@ type Sdk = any;
 
 let sdkPromise: Promise<Sdk> | null = null;
 
+/** Upper bound for one poll; a hung RPC call becomes a visible error. */
+const CALL_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(p: Promise<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${what} timed out after ${CALL_TIMEOUT_MS / 1000}s`)), CALL_TIMEOUT_MS);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function loadSdk(): Promise<Sdk> {
   if (!sdkPromise) {
     sdkPromise = (async () => {
@@ -68,25 +87,40 @@ export class NodeRpc {
     return !!this.client?.isConnected;
   }
 
+  /** In-flight connection attempt, shared so concurrent callers never connect twice. */
+  private connecting: Promise<void> | null = null;
+
   async connect(): Promise<void> {
-    const sdk = await loadSdk();
-    if (!this.client) {
-      this.client = new sdk.RpcClient({
-        url: this.url,
-        encoding: sdk.Encoding.Borsh,
-        networkId: "mainnet",
+    if (this.client?.isConnected) return;
+    if (!this.connecting) {
+      this.connecting = (async () => {
+        const sdk = await loadSdk();
+        if (!this.client) {
+          this.client = new sdk.RpcClient({
+            url: this.url,
+            encoding: sdk.Encoding.Borsh,
+            networkId: "mainnet",
+          });
+        }
+        if (!this.client.isConnected) {
+          await this.client.connect({ blockAsyncConnect: true, timeoutDuration: 3000, retryInterval: 0 });
+        }
+      })().finally(() => {
+        this.connecting = null;
       });
     }
-    if (!this.client.isConnected) {
-      await this.client.connect({ blockAsyncConnect: true, timeoutDuration: 3000, retryInterval: 0 });
-    }
+    return this.connecting;
   }
 
   async disconnect(): Promise<void> {
     await this.client?.disconnect();
   }
 
-  async metrics(): Promise<NodeMetrics> {
+  metrics(): Promise<NodeMetrics> {
+    return withTimeout(this.fetchMetrics(), "Node metrics request");
+  }
+
+  private async fetchMetrics(): Promise<NodeMetrics> {
     await this.connect();
     const c = this.client;
     const [server, dag, peers, info] = await Promise.all([
@@ -120,7 +154,11 @@ export class NodeRpc {
     };
   }
 
-  async chainInfo(): Promise<ChainInfo> {
+  chainInfo(): Promise<ChainInfo> {
+    return withTimeout(this.fetchChainInfo(), "Chain info request");
+  }
+
+  private async fetchChainInfo(): Promise<ChainInfo> {
     await this.connect();
     const c = this.client;
     const supply = await c.getCoinSupply();

@@ -185,7 +185,7 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
           <Tile label="Mempool" value={metrics ? formatInt(metrics.mempoolSize) : "—"} />
           <Tile label="UTXO Index" value={metrics ? (metrics.hasUtxoIndex ? "ENABLED" : "DISABLED") : "—"} />
         </div>
-        {rpcError && state === "running" && <div className="hint">Waiting for node RPC on {rpcUrl}…</div>}
+        {rpcError && state === "running" && <div className="hint">Waiting for node RPC on {rpcUrl}… ({rpcError})</div>}
       </section>
 
       <section>
