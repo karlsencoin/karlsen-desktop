@@ -22,6 +22,15 @@ const POLL_MS = 2000;
 const CHAIN_POLL_MS = 10_000;
 /** Block detail page on the explorer; the block hash is appended. */
 const EXPLORER_BLOCK_URL = "https://explorer.karlsencoin.org/blocks/";
+/**
+ * Karlsen network difficulty as shown on karlsencoin.org and KGI: the raw getBlockDagInfo
+ * difficulty × 2, so that at 1 BPS it matches the network hashrate (H/s) as reported by
+ * the REST server (/info/hashrate) and kls_bridge. Keep all Karlsen surfaces consistent.
+ */
+function networkDifficulty(raw: number): number {
+  return raw * 2;
+}
+
 /** Number of DAG tip hashes shown. */
 const MAX_TIPS = 6;
 
@@ -181,8 +190,12 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
           <Tile label="Network Hashrate" value={metrics ? formatHashrate(metrics.networkHashesPerSecond) : "N/A"} />
           <Tile
             label="Difficulty"
-            value={metrics ? formatDifficulty(metrics.difficulty) : "—"}
-            title={metrics ? formatInt(Math.round(metrics.difficulty)) : undefined}
+            value={metrics ? formatDifficulty(networkDifficulty(metrics.difficulty)) : "—"}
+            title={
+              metrics
+                ? `${formatInt(Math.round(networkDifficulty(metrics.difficulty)))} (node getBlockDagInfo value × 2: ${formatInt(Math.round(metrics.difficulty))})`
+                : undefined
+            }
           />
           <Tile label="Mempool" value={metrics ? formatInt(metrics.mempoolSize) : "—"} />
           <Tile label="UTXO Index" value={metrics ? (metrics.hasUtxoIndex ? "ENABLED" : "DISABLED") : "—"} />
