@@ -21,7 +21,9 @@ export function SettingsPage({ status, onSaved }: { status: NodeStatus | null; o
 
   const resync = async () => {
     const ok = window.confirm(
-      "This stops the node, deletes the downloaded blockchain data and syncs again from scratch.\n\nYour wallet is NOT affected. Continue?",
+      `This stops the node, deletes the downloaded blockchain data in\n${status?.dataDir || "the data folder"}\nand syncs again from scratch.\n\n` +
+        "This is the same folder karlsend uses when started on its own, so a separately run node loses its chain data too.\n\n" +
+        "Your wallet is NOT affected. Continue?",
     );
     if (ok) {
       await backend.deleteAndResync();

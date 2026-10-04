@@ -41,6 +41,8 @@ pub struct NodeStatus {
     pub last_exit_code: Option<i32>,
     /// Unix time (seconds) of the last unexpected exit, if any since the app started.
     pub last_crash_unix: Option<u64>,
+    /// Why the node is not being restarted, for the UI (e.g. data folder in use).
+    pub last_error: Option<String>,
     pub data_dir: String,
 }
 
@@ -51,6 +53,9 @@ struct Inner {
     restarts: u32,
     last_exit_code: Option<i32>,
     last_crash_unix: Option<u64>,
+    last_error: Option<String>,
+    /// Set from karlsend's output when its database is locked by another process.
+    data_dir_locked: bool,
     /// Set when the user asked for a stop, so the exit is not treated as a crash.
     stop_requested: bool,
     data_dir: PathBuf,
@@ -75,6 +80,8 @@ impl NodeManager {
                 restarts: 0,
                 last_exit_code: None,
                 last_crash_unix: None,
+                last_error: None,
+                data_dir_locked: false,
                 stop_requested: false,
                 data_dir: PathBuf::new(),
                 args: Vec::new(),
@@ -99,6 +106,7 @@ impl NodeManager {
             restarts: g.restarts,
             last_exit_code: g.last_exit_code,
             last_crash_unix: g.last_crash_unix,
+            last_error: g.last_error.clone(),
             data_dir: g.data_dir.display().to_string(),
         }
     }
@@ -154,6 +162,8 @@ impl NodeManager {
         let args = {
             let mut g = self.inner.lock().await;
             g.state = NodeState::Starting;
+            g.last_error = None;
+            g.data_dir_locked = false;
             g.args.clone()
         };
         self.emit_status(app).await;
@@ -168,6 +178,10 @@ impl NodeManager {
                 return Err(e.into());
             }
         };
+        if let Err(e) = crate::job::bind_to_desktop_lifetime(child.pid()) {
+            // Not fatal: the node runs, it just may outlive a killed Desktop.
+            self.push_log(app, format!("DESKTOP: warning: {e}"));
+        }
         {
             let mut g = self.inner.lock().await;
             g.child = Some(child);
@@ -188,6 +202,9 @@ impl NodeManager {
                             let line: String = partial.drain(..=pos).collect();
                             let line = line.trim_end().to_string();
                             if !line.is_empty() {
+                                if is_db_lock_error(&line) {
+                                    this.inner.lock().await.data_dir_locked = true;
+                                }
                                 this.push_log(&app, line);
                             }
                         }
@@ -217,6 +234,14 @@ impl NodeManager {
             if g.stop_requested {
                 g.state = NodeState::Stopped;
                 (false, Duration::ZERO)
+            } else if g.data_dir_locked {
+                // Restarting cannot help while another karlsend holds the database.
+                g.state = NodeState::Crashed;
+                g.last_error = Some(format!(
+                    "The data folder {} is in use by another karlsend. Close the other node, then press Start.",
+                    g.data_dir.display()
+                ));
+                (false, Duration::ZERO)
             } else {
                 g.state = NodeState::Crashed;
                 g.restarts += 1;
@@ -230,6 +255,9 @@ impl NodeManager {
         };
         self.exited.notify_waiters();
         self.push_log(app, format!("DESKTOP: karlsend exited (code {code:?})"));
+        if let Some(e) = self.inner.lock().await.last_error.clone() {
+            self.push_log(app, format!("DESKTOP: {e}"));
+        }
         self.emit_status(app).await;
 
         if restart {
@@ -310,5 +338,26 @@ impl NodeManager {
             std::fs::remove_dir_all(&chain_dir)?;
         }
         self.start(app, data_dir, args, auto_restart).await
+    }
+}
+
+/// RocksDB reports a database held by another process as
+/// "Failed to create lock file: ...LOCK" on Windows (seen with karlsend 3.3.0) and
+/// "While lock file: ...LOCK: Resource temporarily unavailable" on Linux.
+fn is_db_lock_error(line: &str) -> bool {
+    line.contains("LOCK") && (line.contains("Failed to create lock file") || line.contains("While lock file"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_db_lock_error;
+
+    #[test]
+    fn detects_rocksdb_lock_error() {
+        let windows = r#"[ERROR] thread 'main' panicked at database\src\db\conn_builder.rs:167:114: called `Result::unwrap()` on an `Err` value: Error { message: "IO error: Failed to create lock file: C:\\Users\\Mine8\\AppData\\Local\\rusty-karlsen\\karlsen-mainnet\\datadir\\meta/LOCK: Dosya ba?ka bir i?lem taraf?ndan kullan?ld???ndan" }"#;
+        assert!(is_db_lock_error(windows));
+        let linux = "IO error: While lock file: /home/karl/.rusty-karlsen/karlsen-mainnet/datadir/meta/LOCK: Resource temporarily unavailable";
+        assert!(is_db_lock_error(linux));
+        assert!(!is_db_lock_error("[INFO ] Accepted block abc via relay"));
     }
 }

@@ -12,6 +12,8 @@ export interface NodeStatus {
   lastExitCode: number | null;
   /** Unix time (seconds) of the last unexpected exit. */
   lastCrashUnix: number | null;
+  /** Why the node is not restarted automatically (e.g. data folder in use). */
+  lastError: string | null;
   dataDir: string;
 }
 

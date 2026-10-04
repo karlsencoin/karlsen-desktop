@@ -1,6 +1,7 @@
 //! Karlsen Desktop v3 - Tauri backend.
 
 mod emission;
+mod job;
 mod node;
 mod settings;
 
@@ -34,6 +35,17 @@ async fn start_node_from_settings(app: &AppHandle, state: &AppState) -> anyhow::
         tokio::task::spawn_blocking(move || s.node_args(&dir)).await?
     };
     state.node.start(app, data_dir, args, s.auto_restart_node).await
+}
+
+/// karlsend's own default application directory (rusty-karlsen `get_app_dir()`):
+/// `%LOCALAPPDATA%\\rusty-karlsen` on Windows, `~/.rusty-karlsen` elsewhere.
+/// Desktop uses the same folder by default, so an existing node's chain data is reused
+/// and the database never lands in a roaming profile.
+fn karlsend_default_app_dir(app: &AppHandle) -> tauri::Result<PathBuf> {
+    #[cfg(windows)]
+    return Ok(app.path().local_data_dir()?.join("rusty-karlsen"));
+    #[cfg(not(windows))]
+    return Ok(app.path().home_dir()?.join(".rusty-karlsen"));
 }
 
 #[tauri::command]
@@ -107,7 +119,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
-            let default_data_dir = app.path().app_data_dir()?;
+            let default_data_dir = karlsend_default_app_dir(app.handle())?;
             let settings = Settings::load(&config_dir);
             let auto_start = settings.auto_start_node;
 

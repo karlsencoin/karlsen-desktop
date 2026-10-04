@@ -174,6 +174,7 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
           </div>
         </div>
 
+        {status?.lastError && <div className="node-error">{status.lastError}</div>}
         <div className="tiles">
           <Tile label="Uptime" value={formatUptime(status?.uptimeSecs ?? null)} />
           <Tile label="Network" value={metrics?.networkName.toUpperCase() ?? "KARLSEN-MAINNET"} />
