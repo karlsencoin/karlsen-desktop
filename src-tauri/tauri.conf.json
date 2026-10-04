@@ -27,7 +27,7 @@
     "active": true,
     "targets": ["msi", "nsis", "appimage", "deb"],
     "externalBin": ["binaries/karlsend"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico", "icons/icon.png"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"],
     "category": "Finance",
     "shortDescription": "Karlsen full node and wallet",
     "longDescription": "Karlsen Desktop runs a rusty-karlsen full node automatically and bundles the Karlsen Web Wallet."

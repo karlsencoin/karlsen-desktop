@@ -72,7 +72,7 @@ export function App() {
   return (
     <div className="app">
       <header>
-        <div className="brand">Karlsen Desktop <span className="ver">v3.0.0</span></div>
+        <div className="brand"><img className="brand-logo" src="/karlsen-logo.svg" alt="" />Karlsen Desktop <span className="ver">v3.0.0</span></div>
         <nav>
           {TABS.map((t) => (
             <button key={t.id} className={tab === t.id ? "tab active" : "tab"} onClick={() => setTab(t.id)}>{t.label}</button>
