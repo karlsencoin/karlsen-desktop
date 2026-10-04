@@ -17,6 +17,8 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 const LOG_CAPACITY: usize = 5_000;
 const GRACEFUL_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// A run at least this long counts as stable and clears the crash streak.
+const STABLE_RUN: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -34,8 +36,11 @@ pub struct NodeStatus {
     pub state: NodeState,
     pub pid: Option<u32>,
     pub uptime_secs: Option<u64>,
+    /// Consecutive unexpected exits; reset after the node has run stably for `STABLE_RUN`.
     pub restarts: u32,
     pub last_exit_code: Option<i32>,
+    /// Unix time (seconds) of the last unexpected exit, if any since the app started.
+    pub last_crash_unix: Option<u64>,
     pub data_dir: String,
 }
 
@@ -45,6 +50,7 @@ struct Inner {
     started_at: Option<Instant>,
     restarts: u32,
     last_exit_code: Option<i32>,
+    last_crash_unix: Option<u64>,
     /// Set when the user asked for a stop, so the exit is not treated as a crash.
     stop_requested: bool,
     data_dir: PathBuf,
@@ -68,6 +74,7 @@ impl NodeManager {
                 started_at: None,
                 restarts: 0,
                 last_exit_code: None,
+                last_crash_unix: None,
                 stop_requested: false,
                 data_dir: PathBuf::new(),
                 args: Vec::new(),
@@ -79,13 +86,19 @@ impl NodeManager {
     }
 
     pub async fn status(&self) -> NodeStatus {
-        let g = self.inner.lock().await;
+        let mut g = self.inner.lock().await;
+        // A node that has stayed up for STABLE_RUN is healthy again: clear the crash streak
+        // so the UI stops flagging it and the next crash starts from the shortest backoff.
+        if g.state == NodeState::Running && g.started_at.is_some_and(|t| t.elapsed() >= STABLE_RUN) {
+            g.restarts = 0;
+        }
         NodeStatus {
             state: g.state,
             pid: g.child.as_ref().map(|c| c.pid()),
             uptime_secs: g.started_at.map(|t| t.elapsed().as_secs()),
             restarts: g.restarts,
             last_exit_code: g.last_exit_code,
+            last_crash_unix: g.last_crash_unix,
             data_dir: g.data_dir.display().to_string(),
         }
     }
@@ -194,6 +207,10 @@ impl NodeManager {
     async fn on_exit(&self, app: &AppHandle, code: Option<i32>) {
         let (restart, backoff) = {
             let mut g = self.inner.lock().await;
+            // A crash after a long stable run is a fresh incident, not part of a crash loop.
+            if g.started_at.is_some_and(|t| t.elapsed() >= STABLE_RUN) {
+                g.restarts = 0;
+            }
             g.child = None;
             g.started_at = None;
             g.last_exit_code = code;
@@ -203,6 +220,10 @@ impl NodeManager {
             } else {
                 g.state = NodeState::Crashed;
                 g.restarts += 1;
+                g.last_crash_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs());
                 let backoff = Duration::from_secs(2u64.saturating_pow(g.restarts.min(6))).min(MAX_BACKOFF);
                 (g.auto_restart, backoff)
             }

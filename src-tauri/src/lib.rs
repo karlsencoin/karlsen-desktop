@@ -1,5 +1,6 @@
 //! Karlsen Desktop v3 - Tauri backend.
 
+mod emission;
 mod node;
 mod settings;
 
@@ -64,6 +65,12 @@ async fn node_restart(app: AppHandle, state: State<'_, AppState>) -> CmdResult<(
 #[tauri::command]
 async fn node_delete_and_resync(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     state.node.delete_and_resync(&app).await.map_err(err)
+}
+
+/// Mainnet block reward schedule at a DAA score (pure computation, no node call).
+#[tauri::command]
+fn block_reward_info(daa_score: u64) -> emission::BlockRewardInfo {
+    emission::block_reward_info(daa_score)
 }
 
 #[tauri::command]
@@ -161,6 +168,7 @@ pub fn run() {
             node_delete_and_resync,
             get_settings,
             save_settings,
+            block_reward_info,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Karlsen Desktop");

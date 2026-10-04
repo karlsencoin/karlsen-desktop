@@ -10,6 +10,8 @@ export interface NodeStatus {
   uptimeSecs: number | null;
   restarts: number;
   lastExitCode: number | null;
+  /** Unix time (seconds) of the last unexpected exit. */
+  lastCrashUnix: number | null;
   dataDir: string;
 }
 
@@ -27,7 +29,17 @@ export interface Settings {
   extraArgs: string[];
 }
 
+/** Mainnet block reward schedule, computed in Rust from the karlsend subsidy table. */
+export interface BlockRewardInfo {
+  currentRewardSompi: number;
+  nextRewardSompi: number;
+  nextReductionDaaScore: number | null;
+  secondsUntilNextReduction: number | null;
+}
+
 export const backend = {
+  blockRewardInfo: (daaScore: bigint) =>
+    invoke<BlockRewardInfo>("block_reward_info", { daaScore: Number(daaScore) }),
   status: () => invoke<NodeStatus>("node_status"),
   logs: () => invoke<string[]>("node_logs"),
   start: () => invoke<void>("node_start"),

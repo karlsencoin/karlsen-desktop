@@ -15,6 +15,30 @@ export interface NodeMetrics {
   pastMedianTime: bigint;
   mempoolSize: bigint;
   networkHashesPerSecond: bigint | null;
+  /** Current DAG tip block hashes (newest blocks the node knows about). */
+  tipHashes: string[];
+}
+
+/** One fee estimate bucket: feerate in sompi per gram of mass, and expected inclusion time. */
+export interface FeeBucket {
+  feerate: number;
+  estimatedSeconds: number;
+}
+
+/** Slower-changing chain data, polled less often than NodeMetrics. */
+export interface ChainInfo {
+  circulatingSompi: bigint;
+  maxSompi: bigint;
+  priorityFee: FeeBucket | null;
+  normalFee: FeeBucket | null;
+  lowFee: FeeBucket | null;
+}
+
+function toBucket(b: unknown): FeeBucket | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const x = b as any;
+  if (!x || x.feerate == null) return null;
+  return { feerate: Number(x.feerate), estimatedSeconds: Number(x.estimatedSeconds) };
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -92,6 +116,27 @@ export class NodeRpc {
       pastMedianTime: BigInt(dag.pastMedianTime),
       mempoolSize: BigInt(info.mempoolSize),
       networkHashesPerSecond: hashrate,
+      tipHashes: Array.isArray(dag.tipHashes) ? dag.tipHashes.map(String) : [],
+    };
+  }
+
+  async chainInfo(): Promise<ChainInfo> {
+    await this.connect();
+    const c = this.client;
+    const supply = await c.getCoinSupply();
+    let estimate = null;
+    try {
+      // Fee estimation needs a synced mempool; tolerate failure on a syncing node.
+      estimate = (await c.getFeeEstimate()).estimate;
+    } catch {
+      estimate = null;
+    }
+    return {
+      circulatingSompi: BigInt(supply.circulatingSompi),
+      maxSompi: BigInt(supply.maxSompi),
+      priorityFee: toBucket(estimate?.priorityBucket),
+      normalFee: toBucket(estimate?.normalBuckets?.[0]),
+      lowFee: toBucket(estimate?.lowBuckets?.[0]),
     };
   }
 }
