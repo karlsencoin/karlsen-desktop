@@ -76,10 +76,12 @@ impl Settings {
         Ok(())
     }
 
-    /// Resolve the effective node data directory.
+    /// Resolve the effective node data directory (passed as --appdir).
+    /// Empty setting = `default_dir` itself, karlsend's own default folder, so chain data of a
+    /// node run on its own is reused (layout: <appdir>/karlsen-mainnet/{datadir,logs}).
     pub fn resolved_data_dir(&self, default_dir: &Path) -> PathBuf {
         if self.data_dir.trim().is_empty() {
-            default_dir.join("karlsend")
+            default_dir.to_path_buf()
         } else {
             PathBuf::from(self.data_dir.trim())
         }
@@ -133,6 +135,14 @@ pub fn resolve_peers(entries: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_data_dir_is_karlsend_default_folder() {
+        let def = Path::new("/home/karl/.rusty-karlsen");
+        assert_eq!(Settings::default().resolved_data_dir(def), def);
+        let custom = Settings { data_dir: " /data/kls ".into(), ..Settings::default() };
+        assert_eq!(custom.resolved_data_dir(def), Path::new("/data/kls"));
+    }
 
     #[test]
     fn resolve_peers_keeps_ips_dedups_and_skips_bad_names() {
