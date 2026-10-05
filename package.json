@@ -1,0 +1,9 @@
+{
+  "name": "karlsen-desktop-root",
+  "private": true,
+  "description": "Entry point for Tauri's before*Command. Tauri may pick this folder or ui/ as the frontend folder depending on where `cargo tauri` is started; `npm run build` / `npm run dev` work in both.",
+  "scripts": {
+    "dev": "npm --prefix ui run dev",
+    "build": "npm --prefix ui run build"
+  }
+}
