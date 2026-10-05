@@ -1,5 +1,6 @@
 //! Karlsen Desktop v3 - Tauri backend.
 
+mod child;
 mod emission;
 mod job;
 mod node;

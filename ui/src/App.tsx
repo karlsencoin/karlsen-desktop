@@ -80,7 +80,7 @@ export function App() {
         </nav>
       </header>
       <main>
-        {tab === "karlsen" && <Dashboard status={status} rpcUrl={rpcUrl} />}
+        {tab === "karlsen" && <Dashboard status={status} rpcUrl={rpcUrl} settings={settings} />}
         {tab === "settings" && <SettingsPage status={status} onSaved={setSettings} />}
         {tab === "karlsend" && <LogConsole />}
         {walletMounted && (

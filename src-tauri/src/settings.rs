@@ -42,7 +42,9 @@ impl Default for Settings {
             rpc_listen: "127.0.0.1:42110".into(),
             rpc_listen_borsh: "127.0.0.1:43110".into(),
             p2p_listen: "0.0.0.0:42111".into(),
-            upnp_enabled: false,
+            // On, like karlsend itself: a node reachable from the internet strengthens the
+            // network. Settings shows it clearly and the dashboard reports the result.
+            upnp_enabled: true,
             utxo_index: true,
             bootstrap_peers: vec![
                 // DNS name first so a VPS move only needs a DNS update; the raw IP is a

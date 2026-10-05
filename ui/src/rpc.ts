@@ -8,6 +8,10 @@ export interface NodeMetrics {
   isSynced: boolean;
   hasUtxoIndex: boolean;
   peers: number;
+  /** Peers that connected to this node (it is reachable from the internet when > 0). */
+  inboundPeers: number;
+  /** Peers this node dialed. */
+  outboundPeers: number;
   headerCount: bigint;
   blockCount: bigint;
   virtualDaaScore: bigint;
@@ -137,12 +141,17 @@ export class NodeRpc {
     } catch {
       hashrate = null;
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const peerList: any[] = peers.peerInfo ?? [];
+    const outbound = peerList.filter((p) => p.isOutbound === true).length;
     return {
       serverVersion: server.serverVersion,
       networkName: dag.network ?? dag.networkName ?? "karlsen-mainnet",
       isSynced: server.isSynced,
       hasUtxoIndex: server.hasUtxoIndex,
-      peers: peers.peerInfo?.length ?? 0,
+      peers: peerList.length,
+      inboundPeers: peerList.filter((p) => p.isOutbound === false).length,
+      outboundPeers: outbound,
       headerCount: BigInt(dag.headerCount),
       blockCount: BigInt(dag.blockCount),
       virtualDaaScore: BigInt(dag.virtualDaaScore),

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { backend, type BlockRewardInfo, type NodeStatus } from "./backend";
+import { backend, type BlockRewardInfo, type NodeStatus, type Settings } from "./backend";
 import { NodeRpc, type ChainInfo, type NodeMetrics } from "./rpc";
 import {
   formatDifficulty,
@@ -30,6 +30,12 @@ const EXPLORER_BLOCK_URL = "https://explorer.karlsencoin.org/blocks/";
 function networkDifficulty(raw: number): number {
   return raw * 2;
 }
+
+/**
+ * Inbound peers arrive only after the node's address has spread through the network,
+ * so "not reachable" is not claimed before the node has been up this long.
+ */
+const REACHABILITY_GRACE_SECS = 15 * 60;
 
 /** Number of DAG tip hashes shown. */
 const MAX_TIPS = 6;
@@ -68,6 +74,27 @@ function crashLabel(status: NodeStatus | null): string | null {
   return parts.join(" · ");
 }
 
+type Reachability = "yes" | "no" | "checking" | "unknown";
+
+/** Whether other nodes can connect to this one, judged from inbound peer connections. */
+function reachability(m: NodeMetrics | null, status: NodeStatus | null): Reachability {
+  if (!m || status?.state !== "running") return "unknown";
+  if (m.inboundPeers > 0) return "yes";
+  return (status.uptimeSecs ?? 0) >= REACHABILITY_GRACE_SECS ? "no" : "checking";
+}
+
+const REACHABILITY_LABEL: Record<Reachability, string> = {
+  yes: "YES",
+  no: "NO",
+  checking: "CHECKING…",
+  unknown: "—",
+};
+
+/** P2P port from a listen address such as 0.0.0.0:42111 or [::]:42111. */
+function p2pPort(listen: string | undefined): string {
+  return listen?.split(":").pop() || "42111";
+}
+
 function syncLabel(m: NodeMetrics | null): string {
   if (!m) return "WAITING…";
   if (m.isSynced) return "SYNCED";
@@ -76,7 +103,7 @@ function syncLabel(m: NodeMetrics | null): string {
   return days >= 1 ? `SYNCING (${days.toFixed(1)} d behind)` : `SYNCING (${Math.round(behindSecs / 60)} min behind)`;
 }
 
-export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUrl: string }) {
+export function Dashboard({ status, rpcUrl, settings }: { status: NodeStatus | null; rpcUrl: string; settings: Settings | null }) {
   const [metrics, setMetrics] = useState<NodeMetrics | null>(null);
   const [rpcError, setRpcError] = useState<string | null>(null);
   const [chain, setChain] = useState<ChainInfo | null>(null);
@@ -148,6 +175,8 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
   }, [daaScore]);
 
   const state = status?.state ?? "stopped";
+  const reach = reachability(metrics, status);
+  const port = p2pPort(settings?.p2pListen);
   const running = state === "running" || state === "starting";
 
   return (
@@ -178,7 +207,23 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
         <div className="tiles">
           <Tile label="Uptime" value={formatUptime(status?.uptimeSecs ?? null)} />
           <Tile label="Network" value={metrics?.networkName.toUpperCase() ?? "KARLSEN-MAINNET"} />
-          <Tile label="Peers" value={metrics ? String(metrics.peers) : "—"} />
+          <Tile
+            label="Peers"
+            value={metrics ? String(metrics.peers) : "—"}
+            sub={metrics ? `inbound ${metrics.inboundPeers} · outbound ${metrics.outboundPeers}` : undefined}
+          />
+          <Tile
+            label="Reachable from Internet"
+            value={REACHABILITY_LABEL[reach]}
+            title={
+              reach === "yes"
+                ? `${metrics?.inboundPeers} other node(s) connected to yours: you are strengthening the Karlsen network.`
+                : reach === "checking"
+                  ? "Waiting for other nodes to connect; this can take several minutes after start."
+                  : undefined
+            }
+            sub={settings ? `UPnP ${settings.upnpEnabled ? "on" : "off"} · port ${port}` : undefined}
+          />
           <Tile label="Headers" value={metrics ? formatInt(metrics.headerCount) : "—"} />
           <Tile label="Blocks" value={metrics ? formatInt(metrics.blockCount) : "—"} />
           <Tile label="DAA Score" value={metrics ? formatInt(metrics.virtualDaaScore) : "—"} />
@@ -201,6 +246,15 @@ export function Dashboard({ status, rpcUrl }: { status: NodeStatus | null; rpcUr
           <Tile label="Mempool" value={metrics ? formatInt(metrics.mempoolSize) : "—"} />
           <Tile label="UTXO Index" value={metrics ? (metrics.hasUtxoIndex ? "ENABLED" : "DISABLED") : "—"} />
         </div>
+        {reach === "no" && (
+          <div className="hint">
+            No other node has connected to yours yet. Your node works fine for you, but if other nodes can reach it,
+            it strengthens the Karlsen network:{" "}
+            {settings?.upnpEnabled
+              ? `your router may not support UPnP or has it disabled. Forward TCP port ${port} on your router to this computer.`
+              : `turn on UPnP in Settings, or forward TCP port ${port} on your router to this computer.`}
+          </div>
+        )}
         {rpcError && state === "running" && <div className="hint">Waiting for node RPC on {rpcUrl}… ({rpcError})</div>}
       </section>
 

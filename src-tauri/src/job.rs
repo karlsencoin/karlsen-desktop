@@ -5,7 +5,8 @@
 //! keeps the RocksDB LOCK and every later start fails. Each karlsend is put in a
 //! Job Object with KILL_ON_JOB_CLOSE: the job handle lives as long as Desktop,
 //! and Windows terminates the node the moment Desktop's process ends, however
-//! it ends. On other platforms this is a no-op.
+//! it ends. Linux gets the same guarantee from PR_SET_PDEATHSIG in `child.rs`;
+//! elsewhere this is a no-op.
 
 #[cfg(windows)]
 mod imp {

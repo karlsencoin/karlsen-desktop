@@ -44,7 +44,12 @@ export function SettingsPage({ status, onSaved }: { status: NodeStatus | null; o
         <label><input type="checkbox" checked={s.autoStartNode} onChange={(e) => set("autoStartNode", e.target.checked)} /> Start node automatically when Karlsen Desktop opens</label>
         <label><input type="checkbox" checked={s.autoRestartNode} onChange={(e) => set("autoRestartNode", e.target.checked)} /> Restart node automatically if it stops unexpectedly</label>
         <label><input type="checkbox" checked={s.utxoIndex} onChange={(e) => set("utxoIndex", e.target.checked)} /> UTXO index (required by the wallet)</label>
-        <label><input type="checkbox" checked={s.upnpEnabled} onChange={(e) => set("upnpEnabled", e.target.checked)} /> UPnP (open P2P port on your router so other nodes can reach you)</label>
+        <label><input type="checkbox" checked={s.upnpEnabled} onChange={(e) => set("upnpEnabled", e.target.checked)} /> UPnP: ask your router to open the P2P port so other nodes can reach yours (recommended)</label>
+        <p className="help">
+          Nodes that accept connections from the internet make the Karlsen network stronger. With UPnP on, your public IP
+          address is visible to other nodes and your node uses some upload bandwidth to serve them. Turn it off if you do
+          not want that; your node and wallet keep working either way. The KARLSEN tab shows whether other nodes can reach you.
+        </p>
         <label><input type="checkbox" checked={s.runInBackground} onChange={(e) => set("runInBackground", e.target.checked)} /> Keep running in the system tray when the window is closed</label>
       </section>
 

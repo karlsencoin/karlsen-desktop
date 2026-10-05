@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use crate::child::{ChildEvent, NodeChild};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{Mutex, Notify};
 
@@ -47,7 +47,7 @@ pub struct NodeStatus {
 }
 
 struct Inner {
-    child: Option<CommandChild>,
+    child: Option<NodeChild>,
     state: NodeState,
     started_at: Option<Instant>,
     restarts: u32,
@@ -169,13 +169,19 @@ impl NodeManager {
         self.emit_status(app).await;
         self.push_log(app, format!("DESKTOP: starting karlsend {}", args.join(" ")));
 
-        let spawned = app.shell().sidecar("karlsend").and_then(|c| c.args(&args).spawn());
+        // The shell plugin resolves the sidecar path; crate::child spawns it so Linux can
+        // tie karlsend's lifetime to Desktop's (PR_SET_PDEATHSIG).
+        let spawned = app
+            .shell()
+            .sidecar("karlsend")
+            .map_err(anyhow::Error::from)
+            .and_then(|c| Ok(crate::child::spawn(c.args(&args).into())?));
         let (mut rx, child) = match spawned {
             Ok(v) => v,
             Err(e) => {
                 self.inner.lock().await.state = NodeState::Crashed;
                 self.emit_status(app).await;
-                return Err(e.into());
+                return Err(e);
             }
         };
         if let Err(e) = crate::job::bind_to_desktop_lifetime(child.pid()) {
@@ -196,7 +202,7 @@ impl NodeManager {
             let mut partial = String::new();
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                    ChildEvent::Stdout(bytes) | ChildEvent::Stderr(bytes) => {
                         partial.push_str(&String::from_utf8_lossy(&bytes));
                         while let Some(pos) = partial.find('\n') {
                             let line: String = partial.drain(..=pos).collect();
@@ -209,12 +215,11 @@ impl NodeManager {
                             }
                         }
                     }
-                    CommandEvent::Error(e) => this.push_log(&app, format!("DESKTOP: node error: {e}")),
-                    CommandEvent::Terminated(payload) => {
-                        this.on_exit(&app, payload.code).await;
+                    ChildEvent::Error(e) => this.push_log(&app, format!("DESKTOP: node error: {e}")),
+                    ChildEvent::Terminated(code) => {
+                        this.on_exit(&app, code).await;
                         break;
                     }
-                    _ => {}
                 }
             }
         });
