@@ -80,6 +80,8 @@ type Reachability = "yes" | "no" | "checking" | "unknown";
 function reachability(m: NodeMetrics | null, status: NodeStatus | null): Reachability {
   if (!m || status?.state !== "running") return "unknown";
   if (m.inboundPeers > 0) return "yes";
+  // The node did not report peer directions: do not claim "not reachable" on missing data.
+  if (m.peers > 0 && m.inboundPeers + m.outboundPeers === 0) return "unknown";
   return (status.uptimeSecs ?? 0) >= REACHABILITY_GRACE_SECS ? "no" : "checking";
 }
 
@@ -210,7 +212,11 @@ export function Dashboard({ status, rpcUrl, settings }: { status: NodeStatus | n
           <Tile
             label="Peers"
             value={metrics ? String(metrics.peers) : "—"}
-            sub={metrics ? `inbound ${metrics.inboundPeers} · outbound ${metrics.outboundPeers}` : undefined}
+            sub={
+              metrics && metrics.inboundPeers + metrics.outboundPeers > 0
+                ? `inbound ${metrics.inboundPeers} · outbound ${metrics.outboundPeers}`
+                : undefined
+            }
           />
           <Tile
             label="Reachable from Internet"

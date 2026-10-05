@@ -38,6 +38,19 @@ export interface ChainInfo {
   lowFee: FeeBucket | null;
 }
 
+/**
+ * Direction of one peer from getConnectedPeerInfo: true = we dialed it, false = it connected to us,
+ * null = unknown. The SDK may hand peers over as plain objects (camelCase or snake_case keys)
+ * or as Maps, depending on its serializer.
+ */
+function peerIsOutbound(peer: unknown): boolean | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = peer as any;
+  const get = (k: string) => (p instanceof Map ? p.get(k) : p?.[k]);
+  const v = get("isOutbound") ?? get("is_outbound") ?? get("outbound");
+  return typeof v === "boolean" ? v : null;
+}
+
 function toBucket(b: unknown): FeeBucket | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const x = b as any;
@@ -143,15 +156,15 @@ export class NodeRpc {
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const peerList: any[] = peers.peerInfo ?? [];
-    const outbound = peerList.filter((p) => p.isOutbound === true).length;
+    const directions = peerList.map(peerIsOutbound);
     return {
       serverVersion: server.serverVersion,
       networkName: dag.network ?? dag.networkName ?? "karlsen-mainnet",
       isSynced: server.isSynced,
       hasUtxoIndex: server.hasUtxoIndex,
       peers: peerList.length,
-      inboundPeers: peerList.filter((p) => p.isOutbound === false).length,
-      outboundPeers: outbound,
+      inboundPeers: directions.filter((d) => d === false).length,
+      outboundPeers: directions.filter((d) => d === true).length,
       headerCount: BigInt(dag.headerCount),
       blockCount: BigInt(dag.blockCount),
       virtualDaaScore: BigInt(dag.virtualDaaScore),
