@@ -2,14 +2,16 @@ import { useEffect, useState } from "react";
 import { backend, type NodeStatus, type Settings } from "./backend";
 import { Dashboard } from "./Dashboard";
 import { LogConsole } from "./LogConsole";
+import { MinerPage } from "./MinerPage";
 import { SettingsPage } from "./SettingsPage";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-type Tab = "karlsen" | "wallet" | "settings" | "karlsend";
+type Tab = "karlsen" | "wallet" | "miner" | "settings" | "karlsend";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "karlsen", label: "KARLSEN" },
   { id: "wallet", label: "WALLET" },
+  { id: "miner", label: "MINER" },
   { id: "settings", label: "SETTINGS" },
   { id: "karlsend", label: "KARLSEND" },
 ];
@@ -72,7 +74,7 @@ export function App() {
   return (
     <div className="app">
       <header>
-        <div className="brand"><img className="brand-logo" src="/karlsen-logo.svg" alt="" />Karlsen Desktop <span className="ver">v3.0.0</span></div>
+        <div className="brand"><img className="brand-logo" src="/karlsen-logo.svg" alt="" />Karlsen Desktop <span className="ver">v3.1.0</span></div>
         <nav>
           {TABS.map((t) => (
             <button key={t.id} className={tab === t.id ? "tab active" : "tab"} onClick={() => setTab(t.id)}>{t.label}</button>
@@ -81,6 +83,7 @@ export function App() {
       </header>
       <main>
         {tab === "karlsen" && <Dashboard status={status} rpcUrl={rpcUrl} settings={settings} />}
+        {tab === "miner" && <MinerPage />}
         {tab === "settings" && <SettingsPage status={status} onSaved={setSettings} />}
         {tab === "karlsend" && <LogConsole />}
         {walletMounted && (

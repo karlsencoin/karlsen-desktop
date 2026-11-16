@@ -48,7 +48,7 @@ export const LINKS = [
   { label: "Source Code", url: "https://github.com/karlsencoin" },
 ];
 
-function Tile({ label, value, title, sub }: { label: string; value: string; title?: string; sub?: string }) {
+export function Tile({ label, value, title, sub }: { label: string; value: string; title?: string; sub?: string }) {
   return (
     <div className="tile" title={title ?? (sub ? `${value} · ${sub}` : value)}>
       <div className="tile-label">{label}</div>

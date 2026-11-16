@@ -3,9 +3,14 @@
 mod child;
 mod emission;
 mod job;
+mod miner;
+mod miner_install;
+mod miner_settings;
 mod node;
 mod settings;
 
+use miner::{MinerManager, MinerStatus};
+use miner_settings::MinerSettings;
 use node::{NodeManager, NodeStatus};
 use settings::Settings;
 use std::path::PathBuf;
@@ -17,6 +22,8 @@ use tokio::sync::Mutex;
 struct AppState {
     node: NodeManager,
     settings: Mutex<Settings>,
+    miner: MinerManager,
+    miner_settings: Mutex<MinerSettings>,
     config_dir: PathBuf,
     default_data_dir: PathBuf,
 }
@@ -100,6 +107,63 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdRes
     Ok(())
 }
 
+async fn start_miner_from_settings(app: &AppHandle, state: &AppState) -> anyhow::Result<()> {
+    let s = state.miner_settings.lock().await.clone();
+    state.miner.start(app, |config_file| s.miner_args(config_file)).await
+}
+
+#[tauri::command]
+async fn miner_status(state: State<'_, AppState>) -> CmdResult<MinerStatus> {
+    Ok(state.miner.status().await)
+}
+
+#[tauri::command]
+fn miner_logs(state: State<'_, AppState>) -> Vec<String> {
+    state.miner.logs()
+}
+
+/// Built-in pool list for the MINER tab.
+#[tauri::command]
+fn miner_pools() -> &'static [miner_settings::Pool] {
+    miner_settings::POOLS
+}
+
+/// Download the pinned KarlsenMiner release, verify its SHA-256 and install it.
+#[tauri::command]
+async fn miner_install(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.miner.install(&app).await.map_err(err)
+}
+
+#[tauri::command]
+async fn miner_uninstall(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.miner.uninstall(&app).await.map_err(err)
+}
+
+#[tauri::command]
+async fn miner_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    start_miner_from_settings(&app, &state).await.map_err(err)
+}
+
+#[tauri::command]
+async fn miner_stop(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.miner.stop(&app).await.map_err(err)
+}
+
+#[tauri::command]
+async fn get_miner_settings(state: State<'_, AppState>) -> CmdResult<MinerSettings> {
+    Ok(state.miner_settings.lock().await.clone())
+}
+
+/// Save miner settings. Invalid values are refused here, not only in the UI.
+/// Changes apply the next time the miner is started.
+#[tauri::command]
+async fn save_miner_settings(state: State<'_, AppState>, settings: MinerSettings) -> CmdResult<()> {
+    settings.validate()?;
+    settings.save(&state.config_dir).map_err(err)?;
+    *state.miner_settings.lock().await = settings;
+    Ok(())
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -123,10 +187,16 @@ pub fn run() {
             let default_data_dir = karlsend_default_app_dir(app.handle())?;
             let settings = Settings::load(&config_dir);
             let auto_start = settings.auto_start_node;
+            let miner_settings = MinerSettings::load(&config_dir);
+            let auto_start_miner = miner_settings.auto_start;
+            // Local (non-roaming) data: the miner executable must not sync with a profile.
+            let miner_root = app.path().app_local_data_dir()?.join("miner");
 
             app.manage(AppState {
                 node: NodeManager::new(),
                 settings: Mutex::new(settings),
+                miner: MinerManager::new(miner_root),
+                miner_settings: Mutex::new(miner_settings),
                 config_dir,
                 default_data_dir,
             });
@@ -157,6 +227,15 @@ pub fn run() {
                     }
                 });
             }
+            if auto_start_miner {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    if let Err(e) = start_miner_from_settings(&handle, &state).await {
+                        log::error!("miner auto-start failed: {e}");
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -166,7 +245,7 @@ pub fn run() {
                     app.state::<AppState>().settings.lock().await.run_in_background
                 });
                 if background {
-                    // Hide to tray; the node keeps running.
+                    // Hide to tray; the node (and the miner, if started) keep running.
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -182,6 +261,15 @@ pub fn run() {
             get_settings,
             save_settings,
             block_reward_info,
+            miner_status,
+            miner_logs,
+            miner_pools,
+            miner_install,
+            miner_uninstall,
+            miner_start,
+            miner_stop,
+            get_miner_settings,
+            save_miner_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Karlsen Desktop");
@@ -192,6 +280,8 @@ pub fn run() {
             let app = app.clone();
             tauri::async_runtime::block_on(async move {
                 let state = app.state::<AppState>();
+                // Miner first: it is quick, and karlsend then gets its full shutdown window.
+                let _ = state.miner.stop(&app).await;
                 let _ = state.node.stop(&app).await;
             });
         }

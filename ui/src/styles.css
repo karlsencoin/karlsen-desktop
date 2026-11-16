@@ -61,3 +61,14 @@ input.wide { width: 100%; }
 .tips a:hover { text-decoration: underline; }
 .tile-sub { text-align: right; font-size: 11px; color: var(--muted); margin-top: 2px; }
 .node-error { border: 1px solid var(--err); color: var(--err); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 14px; }
+.miner-page a { color: var(--accent); }
+.miner-page select { appearance: none; -webkit-appearance: none; background: var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239a9a9a'/%3E%3C/svg%3E") no-repeat right 10px center; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 28px 6px 10px; font: inherit; }
+.miner-page .grid2 { grid-template-columns: 160px minmax(0, 640px); }
+.miner-page .grid2 > input { width: 100%; }
+.miner-row { display: flex; gap: 8px; min-width: 0; }
+.miner-row select { flex: 0 0 250px; min-width: 0; }
+.miner-row input { flex: 1 1 auto; min-width: 0; }
+.miner-row input[readonly] { color: var(--muted); }
+.miner-log { height: 260px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: monospace; }
+.progress { height: 8px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; max-width: 640px; margin-top: 8px; }
+.progress > div { height: 100%; background: var(--accent); transition: width 0.15s linear; }
