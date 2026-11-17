@@ -218,7 +218,8 @@ mod tests {
         assert_eq!(
             args,
             [
-                "--config", "/x/karlsenminer_config.json", "--log", "off",
+                // Built with Path::join: the separator differs between Windows and Linux.
+                "--config", &Path::new("/x").join("karlsenminer_config.json").display().to_string(), "--log", "off",
                 "--node", "grpc://127.0.0.1:42999",
                 "-u", &format!("{TREASURY}.rig-1"),
                 "-d", "amd:0,1",
