@@ -26,10 +26,10 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis", "appimage", "deb"],
-    "externalBin": ["binaries/karlsend", "binaries/karlsen-stratum-bridge", "binaries/karlsenminer"],
+    "externalBin": ["binaries/karlsend", "binaries/karlsenminer"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico", "icons/icon.png"],
     "category": "Finance",
     "shortDescription": "Karlsen full node, wallet and miner",
-    "longDescription": "Karlsen Desktop runs a rusty-karlsen full node automatically and bundles the Karlsen Web Wallet. It also ships KarlsenMiner (GPU) and the Karlsen stratum bridge for solo mining on your own node from the MINER tab."
+    "longDescription": "Karlsen Desktop runs a rusty-karlsen full node automatically and bundles the Karlsen Web Wallet. It also ships KarlsenMiner (GPU) for solo mining directly on your own node from the MINER tab."
   }
 }

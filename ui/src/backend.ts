@@ -42,22 +42,23 @@ export interface BlockRewardInfo {
 export type MinerState = "stopped" | "starting" | "waiting" | "running" | "stopping" | "crashed";
 
 export interface MinerStatus {
-  /** Versions of the bundled KarlsenMiner and Karlsen stratum bridge. */
+  /** Version of the bundled KarlsenMiner. */
   minerVersion: string;
-  bridgeVersion: string;
-  /** "waiting" = the bridge runs and waits for the node to be reachable and fully synced. */
+  /**
+   * "starting" = checking the node, opening the GPUs, building the DAG;
+   * "waiting" = the miner waits for the node to be reachable and fully synced;
+   * "running" = the GPUs are hashing.
+   */
   state: MinerState;
   minerPid: number | null;
-  bridgePid: number | null;
-  /** Seconds since the miner started hashing in the current session. */
+  /** Seconds since the miner process of the current session started. */
   uptimeSecs: number | null;
-  /** Total hashrate in MH/s from the miner's latest status line. */
+  /** Total hashrate in MH/s from the miner's latest status table. */
   hashrateMhs: number | null;
-  /** Shares only measure the hashrate; rewards come from blocks. */
-  accepted: number | null;
-  rejected: number | null;
   /** Blocks this node accepted from the miner since Karlsen Desktop started. */
   blocksFound: number;
+  /** Blocks the node refused (stale or invalid) since Karlsen Desktop started. */
+  blocksRejected: number;
   restarts: number;
   /** An automatic restart is scheduled after an unexpected exit. */
   restartPending: boolean;
@@ -68,8 +69,6 @@ export interface MinerSettings {
   /** Karlsen address that receives the block rewards. */
   miningAddress: string;
   workerName: string;
-  /** Loopback TCP port of the bundled stratum bridge. */
-  stratumPort: number;
   /** KarlsenMiner -d value: all | amd | nvidia | intel | amd:0,1 | nvidia:0 | 0,1,3 */
   devices: string;
   /** Pause a GPU at this core temperature (°C); null = miner default. */

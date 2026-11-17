@@ -70,5 +70,5 @@ input.wide { width: 100%; }
 .miner-row input { flex: 1 1 auto; min-width: 0; }
 .miner-row input[readonly] { color: var(--muted); }
 .miner-log { height: 260px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: monospace; }
-.log-bridge { color: var(--muted); }
+.log-block { color: var(--accent); font-weight: 600; }
 .miner-page > .hint { margin: 0 0 10px; }

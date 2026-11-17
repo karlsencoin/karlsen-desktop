@@ -1,21 +1,22 @@
 //! Solo mining on the local node.
 //!
-//! KarlsenMiner speaks stratum only, karlsend speaks gRPC, so mining needs the Karlsen
-//! stratum bridge in between. All three ship inside the Desktop installer as sidecars:
+//! KarlsenMiner (v3.3.0+) talks to karlsend directly over gRPC; there is no pool and no
+//! stratum bridge in between. It ships inside the Desktop installer as a sidecar, next to
+//! karlsend:
 //!
 //! ```text
-//! karlsenminer --stratum--> karlsen-stratum-bridge --gRPC--> karlsend (this Desktop's node)
-//!   GPU hashing              127.0.0.1 only                    block templates / submit
+//! karlsenminer --node grpc://127.0.0.1:42110  --gRPC-->  karlsend (this Desktop's node)
+//!   GPU hashing                                           block templates / block submit
 //! ```
 //!
-//! No pool is involved: every block found is submitted by the user's own node and its
-//! reward goes straight to the user's mining address.
+//! Every block found is submitted by the user's own node and its reward goes straight to
+//! the user's mining address.
 //!
-//! One supervisor task owns a mining session: it starts the bridge, waits until the bridge
-//! reports the node as synced and its stratum port answers, then starts the miner. If either
-//! process exits, the other one is stopped too and the session is restarted with backoff.
-//! Both run as child processes exactly like karlsend (see `child.rs` / `job.rs`), so they
-//! can never outlive Karlsen Desktop.
+//! The miner itself waits for the node to be reachable and fully synced before it opens the
+//! GPUs, and stops hashing whenever the node falls out of sync. One supervisor task owns
+//! the process and restarts it with backoff when it exits unexpectedly. It runs as a child
+//! process exactly like karlsend (see `child.rs` / `job.rs`), so it can never outlive
+//! Karlsen Desktop.
 
 use crate::child::{ChildEvent, NodeChild};
 use serde::Serialize;
@@ -27,33 +28,29 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::{mpsc, watch, Mutex};
 
-/// Versions of the bundled sidecars. Keep in sync with the pins in `scripts/fetch-miner.sh`.
-pub const MINER_VERSION: &str = "3.2.0";
-pub const BRIDGE_VERSION: &str = "3.3.2";
+/// Version of the bundled KarlsenMiner. Keep in sync with the pin in `scripts/fetch-miner.sh`.
+pub const MINER_VERSION: &str = "3.3.0";
 
 const MINER_SIDECAR: &str = "karlsenminer";
-const BRIDGE_SIDECAR: &str = "karlsen-stratum-bridge";
 
 const LOG_CAPACITY: usize = 3_000;
-/// Time a process gets to shut down by itself after the stop signal.
+/// Time the miner gets to shut down by itself after the stop signal.
 const GRACEFUL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// A session at least this long counts as stable and clears the crash streak.
 const STABLE_RUN: Duration = Duration::from_secs(600);
 /// Consecutive failed sessions after which Desktop stops restarting.
 const MAX_RESTARTS: u32 = 5;
-/// How often the bridge's stratum port is probed while waiting for the node.
-const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MinerState {
     Stopped,
-    /// The bridge is being started.
+    /// The miner process is up: checking the node, then opening the GPUs and building the DAG.
     Starting,
-    /// The bridge runs and waits for the node to be reachable and fully synced.
+    /// The miner waits for the node to be reachable and fully synced; the GPUs are idle.
     Waiting,
-    /// The miner is connected to the bridge and hashing.
+    /// The GPUs are hashing on the node's block templates.
     Running,
     Stopping,
     Crashed,
@@ -63,20 +60,16 @@ pub enum MinerState {
 #[serde(rename_all = "camelCase")]
 pub struct MinerStatus {
     pub miner_version: &'static str,
-    pub bridge_version: &'static str,
     pub state: MinerState,
     pub miner_pid: Option<u32>,
-    pub bridge_pid: Option<u32>,
-    /// Seconds since the miner started hashing in the current session.
+    /// Seconds since the miner process of the current session started.
     pub uptime_secs: Option<u64>,
-    /// Total hashrate in MH/s from the miner's latest status line.
+    /// Total hashrate in MH/s from the miner's latest status table.
     pub hashrate_mhs: Option<f64>,
-    /// Shares the bridge accepted / rejected. They only measure the hashrate; rewards come
-    /// from blocks.
-    pub accepted: Option<u64>,
-    pub rejected: Option<u64>,
     /// Blocks this node accepted from the miner since Desktop started.
     pub blocks_found: u64,
+    /// Blocks the node refused (stale or invalid) since Desktop started.
+    pub blocks_rejected: u64,
     /// Consecutive failed sessions; reset after a stable run.
     pub restarts: u32,
     /// An automatic restart is scheduled after an unexpected exit.
@@ -85,38 +78,26 @@ pub struct MinerStatus {
     pub last_error: Option<String>,
 }
 
-/// Validated command lines for one mining session (built by `MinerSettings`).
+/// Validated command line for one mining session (built by `MinerSettings`).
 #[derive(Debug, Clone)]
 pub struct Launch {
-    pub bridge_args: Vec<String>,
     pub miner_args: Vec<String>,
-    /// Loopback port the bridge listens on and the miner connects to.
-    pub stratum_port: u16,
-}
-
-#[derive(Default)]
-struct Stats {
-    hashrate_mhs: Option<f64>,
-    accepted: Option<u64>,
-    rejected: Option<u64>,
 }
 
 struct Inner {
     state: MinerState,
     miner_pid: Option<u32>,
-    bridge_pid: Option<u32>,
     started_at: Option<Instant>,
     restarts: u32,
     restart_pending: bool,
     last_error: Option<String>,
     /// Last "ERROR:" line printed by the miner in the current session.
     miner_error_line: Option<String>,
-    /// A condition a restart cannot fix was reported (no GPU, stratum port in use).
+    /// A condition a restart cannot fix was reported (no usable GPU).
     fatal: Option<String>,
-    /// The bridge announced that the node is synced and its listeners are starting.
-    bridge_ready: bool,
+    hashrate_mhs: Option<f64>,
     blocks_found: u64,
-    stats: Stats,
+    blocks_rejected: u64,
     launch: Option<Launch>,
 }
 
@@ -124,12 +105,6 @@ struct Inner {
 enum SessionEnd {
     Stopped,
     Failed { reason: String, fatal: bool },
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Source {
-    Bridge,
-    Miner,
 }
 
 #[derive(Clone)]
@@ -140,7 +115,7 @@ pub struct MinerManager {
     stop: Arc<watch::Sender<bool>>,
     /// `true` while a supervisor task is alive.
     active: Arc<watch::Sender<bool>>,
-    /// Working directory of both sidecars: `<app local data>/miner`.
+    /// Working directory of the miner: `<app local data>/miner`.
     work_dir: PathBuf,
 }
 
@@ -150,16 +125,15 @@ impl MinerManager {
             inner: Arc::new(Mutex::new(Inner {
                 state: MinerState::Stopped,
                 miner_pid: None,
-                bridge_pid: None,
                 started_at: None,
                 restarts: 0,
                 restart_pending: false,
                 last_error: None,
                 miner_error_line: None,
                 fatal: None,
-                bridge_ready: false,
+                hashrate_mhs: None,
                 blocks_found: 0,
-                stats: Stats::default(),
+                blocks_rejected: 0,
                 launch: None,
             })),
             logs: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(LOG_CAPACITY))),
@@ -169,27 +143,24 @@ impl MinerManager {
         }
     }
 
-    /// Folder for the miner's and the bridge's config file arguments.
+    /// Folder for the miner's `--config` argument.
     pub fn work_dir(&self) -> &std::path::Path {
         &self.work_dir
     }
 
     pub async fn status(&self) -> MinerStatus {
         let mut g = self.inner.lock().await;
-        if g.state == MinerState::Running && g.started_at.is_some_and(|t| t.elapsed() >= STABLE_RUN) {
+        if g.state != MinerState::Crashed && g.started_at.is_some_and(|t| t.elapsed() >= STABLE_RUN) {
             g.restarts = 0;
         }
         MinerStatus {
             miner_version: MINER_VERSION,
-            bridge_version: BRIDGE_VERSION,
             state: g.state,
             miner_pid: g.miner_pid,
-            bridge_pid: g.bridge_pid,
             uptime_secs: g.started_at.map(|t| t.elapsed().as_secs()),
-            hashrate_mhs: g.stats.hashrate_mhs,
-            accepted: g.stats.accepted,
-            rejected: g.stats.rejected,
+            hashrate_mhs: g.hashrate_mhs,
             blocks_found: g.blocks_found,
+            blocks_rejected: g.blocks_rejected,
             restarts: g.restarts,
             restart_pending: g.restart_pending,
             last_error: g.last_error.clone(),
@@ -246,14 +217,14 @@ impl MinerManager {
         Ok(())
     }
 
-    /// Stop the session and wait until both processes are gone.
+    /// Stop the session and wait until the miner is gone.
     pub async fn stop(&self, app: &AppHandle) -> anyhow::Result<()> {
         if !*self.active.borrow() {
             return Ok(());
         }
         self.stop.send_replace(true);
         let mut active = self.active.subscribe();
-        // Two graceful timeouts plus kill time is the worst case inside the supervisor.
+        // One graceful timeout plus the kill is the worst case inside the supervisor.
         if tokio::time::timeout(GRACEFUL_TIMEOUT * 3, active.wait_for(|a| !*a)).await.is_err() {
             self.push_log(app, "DESKTOP: mining did not stop in time".into());
         }
@@ -269,9 +240,8 @@ impl MinerManager {
                 let mut g = self.inner.lock().await;
                 let stable = g.started_at.is_some_and(|t| t.elapsed() >= STABLE_RUN);
                 g.miner_pid = None;
-                g.bridge_pid = None;
                 g.started_at = None;
-                g.stats = Stats::default();
+                g.hashrate_mhs = None;
                 match end {
                     SessionEnd::Stopped => {
                         g.state = MinerState::Stopped;
@@ -320,22 +290,6 @@ impl MinerManager {
         self.emit_status(&app).await;
     }
 
-    fn spawn_sidecar(
-        &self,
-        app: &AppHandle,
-        name: &str,
-        args: &[String],
-    ) -> anyhow::Result<(mpsc::Receiver<ChildEvent>, NodeChild)> {
-        // The shell plugin resolves the bundled sidecar path (and hides the console window on
-        // Windows); crate::child spawns it so its lifetime is tied to Desktop's.
-        let cmd = app.shell().sidecar(name)?.args(args).current_dir(&self.work_dir);
-        let (rx, child) = crate::child::spawn(cmd.into())?;
-        if let Err(e) = crate::job::bind_to_desktop_lifetime(child.pid()) {
-            self.push_log(app, format!("DESKTOP: warning: {e}"));
-        }
-        Ok((rx, child))
-    }
-
     async fn run_session(&self, app: &AppHandle, stop: &mut watch::Receiver<bool>) -> SessionEnd {
         let launch = {
             let mut g = self.inner.lock().await;
@@ -344,8 +298,7 @@ impl MinerManager {
             g.last_error = None;
             g.miner_error_line = None;
             g.fatal = None;
-            g.bridge_ready = false;
-            g.stats = Stats::default();
+            g.hashrate_mhs = None;
             g.launch.clone()
         };
         let Some(launch) = launch else {
@@ -353,77 +306,37 @@ impl MinerManager {
         };
         self.emit_status(app).await;
 
-        // --- Phase 1: bridge, then wait for the node -------------------------------------
-        self.push_log(app, format!("DESKTOP: starting {BRIDGE_SIDECAR} {}", launch.bridge_args.join(" ")));
-        let (mut bridge_rx, bridge) = match self.spawn_sidecar(app, BRIDGE_SIDECAR, &launch.bridge_args) {
+        self.push_log(app, format!("DESKTOP: starting {MINER_SIDECAR} {}", launch.miner_args.join(" ")));
+        // The shell plugin resolves the bundled sidecar path (and hides the console window on
+        // Windows); crate::child spawns it so its lifetime is tied to Desktop's.
+        let spawned = app
+            .shell()
+            .sidecar(MINER_SIDECAR)
+            .map_err(anyhow::Error::from)
+            .and_then(|cmd| {
+                crate::child::spawn(cmd.args(&launch.miner_args).current_dir(&self.work_dir).into())
+                    .map_err(anyhow::Error::from)
+            });
+        let (mut rx, miner) = match spawned {
             Ok(v) => v,
-            Err(e) => return SessionEnd::Failed { reason: format!("Cannot start the stratum bridge: {e}"), fatal: true },
+            Err(e) => return SessionEnd::Failed { reason: format!("Cannot start KarlsenMiner: {e}"), fatal: true },
         };
-        let mut bridge_lines = LineBuffer::default();
-        {
-            let mut g = self.inner.lock().await;
-            g.bridge_pid = Some(bridge.pid());
-            g.state = MinerState::Waiting;
+        if let Err(e) = crate::job::bind_to_desktop_lifetime(miner.pid()) {
+            self.push_log(app, format!("DESKTOP: warning: {e}"));
         }
-        self.emit_status(app).await;
-        self.push_log(app, "DESKTOP: waiting for the node to be fully synced; mining starts by itself".into());
-
-        let mut probe = tokio::time::interval(PROBE_INTERVAL);
-        loop {
-            tokio::select! {
-                ev = bridge_rx.recv() => {
-                    if let Some(code) = self.handle_event(app, ev, &mut bridge_lines, Source::Bridge).await {
-                        return self.bridge_failure(code).await;
-                    }
-                }
-                _ = probe.tick() => {
-                    // The port must answer *and* our bridge must have announced it, so a
-                    // foreign program already listening on that port is not mistaken for it.
-                    let (ready, fatal) = {
-                        let g = self.inner.lock().await;
-                        (g.bridge_ready, g.fatal.clone())
-                    };
-                    if let Some(reason) = fatal {
-                        // e.g. the port is taken: do not wait for a bridge that cannot listen.
-                        self.shutdown(app, &bridge, &mut bridge_rx, &mut bridge_lines, Source::Bridge).await;
-                        return SessionEnd::Failed { reason, fatal: true };
-                    }
-                    if ready && tokio::net::TcpStream::connect(("127.0.0.1", launch.stratum_port)).await.is_ok() {
-                        break;
-                    }
-                }
-                _ = stop_requested(stop) => {
-                    self.set_state(app, MinerState::Stopping).await;
-                    self.shutdown(app, &bridge, &mut bridge_rx, &mut bridge_lines, Source::Bridge).await;
-                    return SessionEnd::Stopped;
-                }
-            }
-        }
-
-        // --- Phase 2: miner ---------------------------------------------------------------
-        self.push_log(app, format!("DESKTOP: node is synced, starting {MINER_SIDECAR} {}", launch.miner_args.join(" ")));
-        let (mut miner_rx, miner) = match self.spawn_sidecar(app, MINER_SIDECAR, &launch.miner_args) {
-            Ok(v) => v,
-            Err(e) => {
-                self.shutdown(app, &bridge, &mut bridge_rx, &mut bridge_lines, Source::Bridge).await;
-                return SessionEnd::Failed { reason: format!("Cannot start KarlsenMiner: {e}"), fatal: true };
-            }
-        };
-        let mut miner_lines = LineBuffer::default();
+        let mut lines = LineBuffer::default();
         {
             let mut g = self.inner.lock().await;
             g.miner_pid = Some(miner.pid());
-            g.state = MinerState::Running;
             g.started_at = Some(Instant::now());
         }
         self.emit_status(app).await;
 
         loop {
             tokio::select! {
-                ev = miner_rx.recv() => {
-                    if let Some(code) = self.handle_event(app, ev, &mut miner_lines, Source::Miner).await {
+                ev = rx.recv() => {
+                    if let Some(code) = self.handle_event(app, ev, &mut lines).await {
                         self.push_log(app, format!("DESKTOP: karlsenminer exited (code {code:?})"));
-                        self.shutdown(app, &bridge, &mut bridge_rx, &mut bridge_lines, Source::Bridge).await;
                         let g = self.inner.lock().await;
                         return match &g.fatal {
                             Some(reason) => SessionEnd::Failed { reason: reason.clone(), fatal: true },
@@ -437,28 +350,13 @@ impl MinerManager {
                         };
                     }
                 }
-                ev = bridge_rx.recv() => {
-                    if let Some(code) = self.handle_event(app, ev, &mut bridge_lines, Source::Bridge).await {
-                        // Without the bridge the miner has nothing to mine on.
-                        self.shutdown(app, &miner, &mut miner_rx, &mut miner_lines, Source::Miner).await;
-                        return self.bridge_failure(code).await;
-                    }
-                }
                 _ = stop_requested(stop) => {
                     self.set_state(app, MinerState::Stopping).await;
                     self.push_log(app, "DESKTOP: stopping mining".into());
-                    self.shutdown(app, &miner, &mut miner_rx, &mut miner_lines, Source::Miner).await;
-                    self.shutdown(app, &bridge, &mut bridge_rx, &mut bridge_lines, Source::Bridge).await;
+                    self.shutdown(app, &miner, &mut rx, &mut lines).await;
                     return SessionEnd::Stopped;
                 }
             }
-        }
-    }
-
-    async fn bridge_failure(&self, code: Option<i32>) -> SessionEnd {
-        match self.inner.lock().await.fatal.clone() {
-            Some(reason) => SessionEnd::Failed { reason, fatal: true },
-            None => SessionEnd::Failed { reason: format!("The stratum bridge exited (code {code:?})."), fatal: false },
         }
     }
 
@@ -468,13 +366,14 @@ impl MinerManager {
         app: &AppHandle,
         event: Option<ChildEvent>,
         lines: &mut LineBuffer,
-        source: Source,
     ) -> Option<Option<i32>> {
         match event {
             Some(ChildEvent::Stdout(bytes)) | Some(ChildEvent::Stderr(bytes)) => {
                 for line in lines.feed(&bytes) {
-                    self.absorb_line(&line, source).await;
-                    self.push_log(app, if source == Source::Bridge { format!("BRIDGE: {line}") } else { line });
+                    if self.absorb_line(&line).await {
+                        self.emit_status(app).await;
+                    }
+                    self.push_log(app, line);
                 }
                 None
             }
@@ -488,69 +387,62 @@ impl MinerManager {
         }
     }
 
-    /// Update statistics and error state from one line of output.
-    async fn absorb_line(&self, line: &str, source: Source) {
-        match source {
-            Source::Miner => {
-                let info = parse_miner_line(line);
-                if info == MinerLine::default() {
-                    return;
-                }
-                let mut g = self.inner.lock().await;
-                if let Some(h) = info.hashrate_mhs {
-                    g.stats.hashrate_mhs = Some(h);
-                }
-                if let Some((a, r)) = info.shares {
-                    g.stats.accepted = Some(a);
-                    g.stats.rejected = Some(r);
-                }
-                if info.no_gpu {
-                    g.fatal = Some(
-                        "No usable GPU found. KarlsenMiner needs an AMD, NVIDIA or Intel Arc GPU with 6 GB+ VRAM \
-                         and a working OpenCL or CUDA driver."
-                            .into(),
-                    );
-                }
-                if let Some(e) = info.error {
-                    g.miner_error_line = Some(e);
-                }
-            }
-            Source::Bridge => match parse_bridge_line(line) {
-                BridgeLine::Ready => self.inner.lock().await.bridge_ready = true,
-                BridgeLine::BlockAccepted => self.inner.lock().await.blocks_found += 1,
-                BridgeLine::PortInUse => {
-                    self.inner.lock().await.fatal = Some(
-                        "The stratum port is already in use by another program (another stratum bridge?). \
-                         Close it or choose a different port in the mining settings."
-                            .into(),
-                    )
-                }
-                BridgeLine::Other => {}
-            },
+    /// Update state and statistics from one line of miner output. Returns true when the UI
+    /// should be told at once instead of at its next poll (state change or a block).
+    async fn absorb_line(&self, line: &str) -> bool {
+        let info = parse_miner_line(line);
+        if info == MinerLine::default() {
+            return false;
         }
+        let mut g = self.inner.lock().await;
+        if let Some(h) = info.hashrate_mhs {
+            g.hashrate_mhs = Some(h);
+        }
+        match info.block {
+            Some(BlockOutcome::Accepted) => g.blocks_found += 1,
+            Some(BlockOutcome::Rejected) => g.blocks_rejected += 1,
+            None => {}
+        }
+        if info.no_gpu {
+            g.fatal = Some(
+                "No usable GPU found. KarlsenMiner needs an AMD, NVIDIA or Intel Arc GPU with 6 GB+ VRAM \
+                 and a working OpenCL or CUDA driver."
+                    .into(),
+            );
+        }
+        if let Some(e) = info.error {
+            g.miner_error_line = Some(e);
+        }
+        let before = g.state;
+        // Late output must never overwrite Stopping / Crashed.
+        if matches!(g.state, MinerState::Starting | MinerState::Waiting | MinerState::Running) {
+            match info.node {
+                Some(NodeState::Waiting) => {
+                    g.state = MinerState::Waiting;
+                    g.hashrate_mhs = None;
+                }
+                // The node is fine; the GPUs are being opened and the DAG is built.
+                Some(NodeState::Synced) => g.state = MinerState::Starting,
+                Some(NodeState::Mining) => g.state = MinerState::Running,
+                None => {}
+            }
+        }
+        g.state != before || info.block.is_some()
     }
 
-    /// Stop a child (the miner gracefully where possible, the bridge by kill) and drain its
-    /// output until it has terminated.
+    /// Stop the miner (its own Ctrl+C path where possible) and drain its output until it
+    /// has terminated.
     async fn shutdown(
         &self,
         app: &AppHandle,
         child: &NodeChild,
         rx: &mut mpsc::Receiver<ChildEvent>,
         lines: &mut LineBuffer,
-        source: Source,
     ) {
-        // The bridge is killed outright: it keeps no state, by now it has no miner left to
-        // serve, and while it is still waiting for the node it does not react to Ctrl+C at
-        // all (bridge v3.3.2), which would make "Stop mining" hang for the grace period.
         #[cfg(unix)]
-        if source == Source::Miner {
-            // KarlsenMiner shuts down cleanly on SIGINT (its own Ctrl+C path).
-            unsafe {
-                libc::kill(child.pid() as libc::pid_t, libc::SIGINT);
-            }
-        } else {
-            let _ = child.kill();
+        unsafe {
+            // KarlsenMiner shuts down cleanly on SIGINT.
+            libc::kill(child.pid() as libc::pid_t, libc::SIGINT);
         }
         #[cfg(not(unix))]
         {
@@ -562,7 +454,7 @@ impl MinerManager {
             let drained = tokio::time::timeout(GRACEFUL_TIMEOUT, async {
                 loop {
                     let ev = rx.recv().await;
-                    if self.handle_event(app, ev, lines, source).await.is_some() {
+                    if self.handle_event(app, ev, lines).await.is_some() {
                         break;
                     }
                 }
@@ -572,7 +464,7 @@ impl MinerManager {
                 return;
             }
             if attempt == 0 {
-                self.push_log(app, "DESKTOP: process did not stop in time, killing".into());
+                self.push_log(app, "DESKTOP: miner did not stop in time, killing".into());
                 let _ = child.kill();
             }
         }
@@ -632,12 +524,29 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// What one line of KarlsenMiner output tells Desktop.
+/// What the miner said about the node.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum NodeState {
+    /// Node unreachable or still syncing; the miner waits.
+    Waiting,
+    /// Node reachable and synced; the GPUs are not hashing yet.
+    Synced,
+    /// A block template reached the GPUs.
+    Mining,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum BlockOutcome {
+    Accepted,
+    Rejected,
+}
+
+/// What one line of KarlsenMiner v3.3.0 output tells Desktop.
 #[derive(Debug, Default, PartialEq)]
 struct MinerLine {
     hashrate_mhs: Option<f64>,
-    /// (accepted, rejected)
-    shares: Option<(u64, u64)>,
+    node: Option<NodeState>,
+    block: Option<BlockOutcome>,
     error: Option<String>,
     no_gpu: bool,
 }
@@ -649,15 +558,11 @@ fn leading_number(s: &str) -> Option<(f64, &str)> {
     Some((value, &s[end..]))
 }
 
-fn leading_integer(s: &str) -> Option<(u64, &str)> {
-    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    let value = s[..end].parse::<u64>().ok()?;
-    Some((value, &s[end..]))
-}
-
-/// Parse the miner's summary line, e.g.
-/// `Total: 58.37 MH/s (avg 58.12 MH/s) | A:106/R:2 | 0.375 | 156W | Best: 4.21`,
-/// and its `ERROR:` lines. Input must already be free of ANSI sequences.
+/// Parse the lines Desktop reacts to (all printed by `karlsenminer --node`, v3.3.0):
+/// the table's summary line, e.g.
+/// `Total: 58.37 MH/s (avg 58.12 MH/s) | A:1/R:0 | 0.375 | 156W | Best: 4.2G`,
+/// the node-state messages, block results and `ERROR:` lines.
+/// Input must already be free of ANSI sequences.
 fn parse_miner_line(line: &str) -> MinerLine {
     let mut info = MinerLine::default();
     if let Some(pos) = line.find("Total:") {
@@ -670,14 +575,29 @@ fn parse_miner_line(line: &str) -> MinerLine {
                 info.hashrate_mhs = Some(value * mul / div);
             }
         }
-        if let Some(a_pos) = rest.find("A:") {
-            if let Some((accepted, after)) = leading_integer(&rest[a_pos + 2..]) {
-                if let Some((rejected, _)) = after.strip_prefix("/R:").and_then(leading_integer) {
-                    info.shares = Some((accepted, rejected));
-                }
-            }
-        }
     }
+
+    const WAITING: [&str; 4] = [
+        "is still syncing - waiting",    // before the GPUs are opened
+        "waiting for the node to start", // node not reachable yet
+        "The node is not synced yet",    // fell out of sync while mining
+        "Connection to the node lost",
+    ];
+    if WAITING.iter().any(|m| line.contains(m)) {
+        info.node = Some(NodeState::Waiting);
+    } else if line.contains("Ready to mine") || line.contains("The node is synced - mining") {
+        info.node = Some(NodeState::Mining);
+    } else if line.contains("Node ") && line.ends_with(" is synced") {
+        // "Node grpc://127.0.0.1:42110: karlsend 3.3.0 is synced"
+        info.node = Some(NodeState::Synced);
+    }
+
+    if line.contains("Block accepted by the node") {
+        info.block = Some(BlockOutcome::Accepted);
+    } else if line.contains("Block rejected by the node") || line.contains("SubmitBlock failed") {
+        info.block = Some(BlockOutcome::Rejected);
+    }
+
     if let Some(pos) = line.find("ERROR:") {
         let text = line[pos + "ERROR:".len()..].trim();
         if !text.is_empty() {
@@ -686,34 +606,6 @@ fn parse_miner_line(line: &str) -> MinerLine {
         }
     }
     info
-}
-
-#[derive(Debug, PartialEq)]
-enum BridgeLine {
-    /// "Node is synced, starting stratum listeners"
-    Ready,
-    /// The node accepted a block mined here.
-    BlockAccepted,
-    /// The stratum port could not be bound.
-    PortInUse,
-    Other,
-}
-
-/// Recognise the karlsen-stratum-bridge v3.3.2 log lines Desktop reacts to.
-fn parse_bridge_line(line: &str) -> BridgeLine {
-    // Not just "starting stratum listeners": the earlier "Waiting for node to fully sync
-    // before starting stratum listeners" line contains that too.
-    if line.contains("Node is synced, starting stratum listeners") {
-        BridgeLine::Ready
-    } else if line.contains("BLOCK ACCEPTED BY NODE!") {
-        // Printed once per block by the share handler (the API layer logs the same event
-        // as "BLOCK ACCEPTED BY KARLSEN NODE", which is deliberately not matched).
-        BridgeLine::BlockAccepted
-    } else if line.contains("failed listening to socket") {
-        BridgeLine::PortInUse
-    } else {
-        BridgeLine::Other
-    }
 }
 
 #[cfg(test)]
@@ -737,13 +629,12 @@ mod tests {
 
     #[test]
     fn parses_miner_summary_line() {
-        let line = "   Total: 58.37 MH/s (avg 58.12 MH/s) | A:106/R:2 | 0.375 | 156W | Best: 4.21";
+        let line = "   Total: 58.37 MH/s (avg 58.12 MH/s) | A:1/R:0 | 0.375 | 156W | Best: 4.2G";
         let info = parse_miner_line(line);
         assert_eq!(info.hashrate_mhs, Some(58.37));
-        assert_eq!(info.shares, Some((106, 2)));
-        assert_eq!(info.error, None);
+        assert_eq!((info.node, info.block, info.error.clone()), (None, None, None));
         assert_eq!(parse_miner_line("Total: 1.5 GH/s | A:0/R:0").hashrate_mhs, Some(1500.0));
-        assert_eq!(parse_miner_line("Total: 950.0 kH/s").hashrate_mhs, Some(0.95));
+        assert_eq!(parse_miner_line("Total: 950.00 KH/s (avg 0.00 H/s)").hashrate_mhs, Some(0.95));
     }
 
     #[test]
@@ -754,31 +645,49 @@ mod tests {
             MinerLine::default()
         );
         assert_eq!(parse_miner_line("Total: starting"), MinerLine::default());
+        assert_eq!(parse_miner_line("[..] Solo mining on node: grpc://127.0.0.1:42110 (no pool)"), MinerLine::default());
+        assert_eq!(parse_miner_line("[..] Connected to karlsend 3.3.0 (synced: true)"), MinerLine::default());
     }
 
     #[test]
     fn detects_missing_gpu() {
-        // Real output of karlsenminer 3.2.0 on a machine without a GPU.
+        // Real output of karlsenminer on a machine without a GPU.
         let raw = "[2026-11-16 20:55:57] \u{1b}[31mERROR: no usable GPU found (OpenCL or CUDA)\u{1b}[0m";
         assert!(parse_miner_line(&strip_ansi(raw)).no_gpu);
-        let other = parse_miner_line("[..] ERROR: pool connection lost");
+        let other = parse_miner_line("[..] ERROR: cannot start the node client runtime: x");
         assert!(!other.no_gpu);
-        assert_eq!(other.error.as_deref(), Some("pool connection lost"));
+        assert_eq!(other.error.as_deref(), Some("cannot start the node client runtime: x"));
     }
 
     #[test]
-    fn recognises_bridge_lines() {
-        // Real lines of karlsen-stratum-bridge 3.3.2.
-        let waiting = "2026-11-16 21:17:04.928+00:00 [INFO]  karlsen_stratum_bridge: Waiting for node to fully sync before starting stratum listeners";
-        assert_eq!(parse_bridge_line(waiting), BridgeLine::Other);
-        let ready = "2026-11-16 21:17:09.100+00:00 [INFO]  karlsen_stratum_bridge: Node is synced, starting stratum listeners";
-        assert_eq!(parse_bridge_line(ready), BridgeLine::Ready);
-        assert_eq!(parse_bridge_line("[127.0.0.1:5555] [BLOCK] BLOCK ACCEPTED BY NODE! Hash: abc"), BridgeLine::BlockAccepted);
-        assert_eq!(parse_bridge_line("[API] ===== BLOCK ACCEPTED BY KARLSEN NODE ===== Hash: abc"), BridgeLine::Other);
+    fn follows_the_node_state() {
+        // Real lines of karlsenminer 3.3.0 --node (ANSI already stripped).
+        let node = |l: &str| parse_miner_line(l).node;
         assert_eq!(
-            parse_bridge_line("failed listening to socket 127.0.0.1:5555: Address already in use"),
-            BridgeLine::PortInUse
+            node("[2026-11-17 03:38:43] Node grpc://127.0.0.1:42520: karlsend 3.3.0 is still syncing - waiting; the GPUs start when it is synced"),
+            Some(NodeState::Waiting)
         );
-        assert_eq!(parse_bridge_line("Connecting to Karlsen node at 127.0.0.1:42110"), BridgeLine::Other);
+        assert_eq!(
+            node("[2026-11-17 03:38:07] cannot connect to karlsend at grpc://127.0.0.1:42599: Endpoint connection error: transport error - waiting for the node to start"),
+            Some(NodeState::Waiting)
+        );
+        assert_eq!(node("[..] The node is not synced yet - mining starts by itself when it is"), Some(NodeState::Waiting));
+        assert_eq!(node("[..] Connection to the node lost"), Some(NodeState::Waiting));
+        assert_eq!(node("[..] Node grpc://127.0.0.1:42110: karlsend 3.3.0 is synced"), Some(NodeState::Synced));
+        assert_eq!(node("[2026-11-17 03:42:38] Ready to mine - network difficulty 4.2G"), Some(NodeState::Mining));
+        assert_eq!(node("[..] The node is synced - mining"), Some(NodeState::Mining));
+    }
+
+    #[test]
+    fn counts_blocks() {
+        let block = |l: &str| parse_miner_line(l).block;
+        // "BLOCK FOUND" is only the candidate; the node's answer is what counts.
+        assert_eq!(block("[..] GPU 0: BLOCK FOUND b284d48d (network difficulty 4.2G)"), None);
+        assert_eq!(
+            block("[2026-11-17 03:42:38] Block accepted by the node: b284d48d65e10a73 (blocks found: 1)"),
+            Some(BlockOutcome::Accepted)
+        );
+        assert_eq!(block("[..] Block rejected by the node: b284d48d (BlockInvalid)"), Some(BlockOutcome::Rejected));
+        assert_eq!(block("[..] SubmitBlock failed for b284d48d: transport error"), Some(BlockOutcome::Rejected));
     }
 }

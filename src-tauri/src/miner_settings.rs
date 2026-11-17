@@ -1,16 +1,13 @@
 //! Mining settings (stored as `miner.json` in the app config directory) and their
-//! translation into the KarlsenMiner and karlsen-stratum-bridge command lines.
+//! translation into the KarlsenMiner command line.
 //!
-//! Every value that ends up on a command line is validated here, in the backend, so the
-//! webview cannot pass arbitrary options to either process.
+//! Every value that ends up on the command line is validated here, in the backend, so the
+//! webview cannot pass arbitrary options to the miner process.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const FILE_NAME: &str = "miner.json";
-
-/// Default loopback port of the bundled stratum bridge (the bridge's own default).
-pub const DEFAULT_STRATUM_PORT: u16 = 5555;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
@@ -18,10 +15,8 @@ pub struct MinerSettings {
     /// Karlsen address that receives the block rewards. Empty until the user enters one;
     /// mining never starts without it.
     pub mining_address: String,
-    /// Rig (worker) name; appears in the bridge log and in the coinbase tag of found blocks.
+    /// Rig name; the miner writes it into the coinbase of the blocks it finds.
     pub worker_name: String,
-    /// Loopback TCP port the bundled stratum bridge listens on.
-    pub stratum_port: u16,
     /// KarlsenMiner `-d` value: all | amd | nvidia | intel | amd:0,1 | nvidia:0 | 0,1,3
     pub devices: String,
     /// Pause a GPU at this core temperature in °C (`--gpu-off-temp`). `None` = miner default.
@@ -35,7 +30,6 @@ impl Default for MinerSettings {
         Self {
             mining_address: String::new(),
             worker_name: "desktop".into(),
-            stratum_port: DEFAULT_STRATUM_PORT,
             devices: "all".into(),
             gpu_off_temp: None,
             auto_start: false,
@@ -64,9 +58,6 @@ impl MinerSettings {
     pub fn validate(&self) -> Result<(), String> {
         validate_address(self.mining_address.trim())?;
         validate_worker_name(self.worker_name.trim())?;
-        if self.stratum_port < 1024 {
-            return Err("The stratum port must be between 1024 and 65535.".into());
-        }
         validate_devices(self.devices.trim())?;
         if let Some(t) = self.gpu_off_temp {
             if !(50..=100).contains(&t) {
@@ -76,7 +67,10 @@ impl MinerSettings {
         Ok(())
     }
 
-    /// Build the KarlsenMiner command line: mine on the bundled bridge at 127.0.0.1.
+    /// Build the KarlsenMiner command line: solo mining directly on Desktop's own node.
+    ///
+    /// `node_rpc_listen` is the node's gRPC listen address from the node settings; the miner
+    /// always dials it on 127.0.0.1, also when the node listens on all interfaces.
     ///
     /// `--config` points at a file inside Desktop's own miner folder so a
     /// `karlsenminer_config.json` left somewhere else is never picked up, and `--log off`
@@ -84,15 +78,21 @@ impl MinerSettings {
     /// offered: they make the miner ask for administrator rights and restart itself, which
     /// detaches it from Desktop, and a miner stopped by Desktop on Windows cannot restore
     /// the previous clocks.
-    pub fn miner_args(&self, work_dir: &Path) -> Result<Vec<String>, String> {
+    pub fn miner_args(&self, node_rpc_listen: &str, work_dir: &Path) -> Result<Vec<String>, String> {
         self.validate()?;
+        let node_port = node_rpc_listen
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .filter(|p| *p != 0)
+            .ok_or_else(|| format!("The node's gRPC address \"{node_rpc_listen}\" has no valid port (see Settings)."))?;
         let mut args = vec![
             "--config".to_string(),
             work_dir.join("karlsenminer_config.json").display().to_string(),
             "--log".to_string(),
             "off".to_string(),
-            "-o".to_string(),
-            format!("stratum+tcp://127.0.0.1:{}", self.stratum_port),
+            "--node".to_string(),
+            format!("grpc://127.0.0.1:{node_port}"),
             "-u".to_string(),
             format!("{}.{}", self.mining_address.trim(), self.worker_name.trim()),
             "-d".to_string(),
@@ -103,45 +103,6 @@ impl MinerSettings {
             args.push(t.to_string());
         }
         Ok(args)
-    }
-
-    /// Build the karlsen-stratum-bridge command line.
-    ///
-    /// `node_rpc_listen` is the node's gRPC listen address from the node settings; the bridge
-    /// always dials it on 127.0.0.1. The stratum listener is bound to 127.0.0.1 as well, so
-    /// nothing on the network can connect to it, and every optional HTTP server of the bridge
-    /// (Prometheus, dashboard, health check) is switched off.
-    ///
-    /// `--solo-mining false` keeps the bridge's variable share difficulty: the miner then
-    /// submits frequent low-difficulty shares, which only serve to measure the hashrate and
-    /// show that the GPU works. Rewards are the same either way; every block goes to this
-    /// node and pays the mining address.
-    ///
-    /// `--config` names a file in Desktop's miner folder that does not exist, so the bridge
-    /// runs on its built-in defaults plus these flags and never loads a stray `config.yaml`.
-    pub fn bridge_args(&self, node_rpc_listen: &str, work_dir: &Path) -> Result<Vec<String>, String> {
-        self.validate()?;
-        let node_port = node_rpc_listen
-            .rsplit(':')
-            .next()
-            .and_then(|p| p.trim().parse::<u16>().ok())
-            .filter(|p| *p != 0)
-            .ok_or_else(|| format!("The node's gRPC address \"{node_rpc_listen}\" has no valid port (see Settings)."))?;
-        let flag = |name: &str, value: &str| [name.to_string(), value.to_string()];
-        Ok([
-            flag("--config", &work_dir.join("bridge-config.yaml").display().to_string()),
-            flag("--karlsend-address", &format!("127.0.0.1:{node_port}")),
-            flag("--stratum-port", &format!("127.0.0.1:{}", self.stratum_port)),
-            flag("--solo-mining", "false"),
-            flag("--var-diff", "true"),
-            flag("--prom-port", ""),
-            flag("--web-dashboard-port", ""),
-            flag("--health-check-port", ""),
-            flag("--log-to-file", "false"),
-            flag("--print-stats", "false"),
-            flag("--coinbase-tag-suffix", "KarlsenDesktop"),
-        ]
-        .concat())
     }
 }
 
@@ -242,47 +203,31 @@ mod tests {
     #[test]
     fn default_settings_need_an_address() {
         let s = MinerSettings::default();
-        assert!(s.miner_args(Path::new("/x")).is_err());
-        assert!(s.bridge_args("127.0.0.1:42110", Path::new("/x")).is_err());
+        assert!(s.miner_args("127.0.0.1:42110", Path::new("/x")).is_err());
         assert!(!s.auto_start);
-        assert_eq!(s.stratum_port, 5555);
     }
 
     #[test]
-    fn miner_mines_on_the_local_bridge() {
+    fn miner_mines_on_the_local_node() {
         let mut s = valid();
         s.worker_name = "rig-1".into();
         s.devices = "amd:0,1".into();
         s.gpu_off_temp = Some(80);
-        s.stratum_port = 5600;
-        let args = s.miner_args(Path::new("/x")).unwrap();
+        // Even when the node's RPC is bound to all interfaces, the miner dials loopback.
+        let args = s.miner_args("0.0.0.0:42999", Path::new("/x")).unwrap();
         assert_eq!(
             args,
             [
                 "--config", "/x/karlsenminer_config.json", "--log", "off",
-                "-o", "stratum+tcp://127.0.0.1:5600",
+                "--node", "grpc://127.0.0.1:42999",
                 "-u", &format!("{TREASURY}.rig-1"),
                 "-d", "amd:0,1",
                 "--gpu-off-temp", "80",
             ]
         );
-    }
-
-    #[test]
-    fn bridge_is_loopback_only_and_dials_the_local_node() {
-        let s = valid();
-        // Even when the node's RPC is bound to all interfaces, the bridge dials loopback.
-        let args = s.bridge_args("0.0.0.0:42999", Path::new("/x")).unwrap();
-        let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].as_str();
-        assert_eq!(value("--karlsend-address"), "127.0.0.1:42999");
-        assert_eq!(value("--stratum-port"), "127.0.0.1:5555");
-        assert_eq!(value("--config"), "/x/bridge-config.yaml");
-        for off in ["--prom-port", "--web-dashboard-port", "--health-check-port"] {
-            assert_eq!(value(off), "", "{off} must be disabled");
-        }
-        assert_eq!(value("--log-to-file"), "false");
-        assert!(s.bridge_args("no-port", Path::new("/x")).is_err());
-        assert!(s.bridge_args("127.0.0.1:0", Path::new("/x")).is_err());
+        assert!(!args.iter().any(|a| a == "-o"), "no pool on the command line");
+        assert!(s.miner_args("no-port", Path::new("/x")).is_err());
+        assert!(s.miner_args("127.0.0.1:0", Path::new("/x")).is_err());
     }
 
     #[test]
@@ -306,9 +251,6 @@ mod tests {
         let mut s = valid();
         s.gpu_off_temp = Some(20);
         assert!(s.validate().is_err());
-        let mut s = valid();
-        s.stratum_port = 80;
-        assert!(s.validate().is_err());
     }
 
     #[test]
@@ -326,11 +268,11 @@ mod tests {
         let s = MinerSettings { gpu_off_temp: Some(75), auto_start: true, ..valid() };
         s.save(&dir).unwrap();
         assert_eq!(MinerSettings::load(&dir), s);
-        // "poolUrl" is from an earlier development build; unknown fields are ignored.
-        std::fs::write(dir.join(FILE_NAME), r#"{"workerName":"x","poolUrl":"stratum+ssl://p:1"}"#).unwrap();
+        // "poolUrl" / "stratumPort" are from earlier development builds; unknown fields are ignored.
+        std::fs::write(dir.join(FILE_NAME), r#"{"workerName":"x","poolUrl":"stratum+ssl://p:1","stratumPort":5555}"#).unwrap();
         let partial = MinerSettings::load(&dir);
         assert_eq!(partial.worker_name, "x");
-        assert_eq!(partial.stratum_port, DEFAULT_STRATUM_PORT);
+        assert_eq!(partial.devices, "all");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

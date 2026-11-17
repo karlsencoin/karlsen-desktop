@@ -1,0 +1,178 @@
+# Builds the Karlsen Desktop installers (Windows: NSIS + MSI, Linux: AppImage + deb).
+#
+#   push to `release/desktop`, or "Run workflow"  -> build, then a DRAFT release v<version>
+#                                                     with the installers and SHA256SUMS.txt
+#   push to `ci/**`                                -> build only (to test a change)
+#
+# The draft is published by hand (or deleted) after the installers were tested.
+# No secrets are used: everything bundled comes from public releases, checked by SHA-256.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["release/desktop", "ci/**"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # karlsend: rusty-karlsen v3.3.1 release (its binary reports "karlsend 3.3.0").
+  KARLSEND_RELEASE: https://github.com/karlsencoin/rusty-karlsen/releases/download/v3.3.1
+  # The wallet needs an SDK with accountsSignMessage / accountsBridgeDeposit, which the
+  # v3.3.1 release SDK does not have (wallet/README.md, "SDK"). Built here from this exact
+  # commit of rusty-karlsen branch feat/wallet-bridge-sign-message.
+  SDK_COMMIT: 9c56284be137474d5de7ab5b8cf40c5fed9d4636
+
+jobs:
+  sdk:
+    name: Karlsen WASM SDK
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out rusty-karlsen at the pinned commit
+        run: |
+          git init -q rusty-karlsen && cd rusty-karlsen
+          git remote add origin https://github.com/karlsencoin/rusty-karlsen
+          git fetch -q --depth 1 origin "$SDK_COMMIT"
+          git checkout -q FETCH_HEAD
+          git log --oneline -1
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -y && sudo apt-get install -y protobuf-compiler clang
+          cargo install wasm-pack --locked
+
+      - name: Build the web SDK
+        run: cd rusty-karlsen/wasm && ./build-web --sdk
+
+      - name: Check
+        run: |
+          cd rusty-karlsen/wasm/web/karlsen
+          ls -la
+          test -s karlsen.js && test -s karlsen_bg.wasm
+          # The two calls the wallet depends on must be in this build.
+          grep -q accountsSignMessage karlsen.d.ts
+          grep -q accountsBridgeDeposit karlsen.d.ts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: karlsen-wasm
+          path: |
+            rusty-karlsen/wasm/web/karlsen/karlsen.js
+            rusty-karlsen/wasm/web/karlsen/karlsen_bg.wasm
+            rusty-karlsen/wasm/web/karlsen/karlsen.d.ts
+          if-no-files-found: error
+
+  build:
+    name: ${{ matrix.name }}
+    needs: sdk
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+            karlsend_asset: rusty-karlsen-v3.3.1-linux-musl-amd64.zip
+            karlsend_sha256: 009d50def2f4f3bda5bf0fe016063095d53693e8e3393e4eab05aedbd8b3e8eb
+          - name: Windows
+            os: windows-2022
+            karlsend_asset: rusty-karlsen-v3.3.1-windows-msvc-amd64.zip
+            karlsend_sha256: f7692c32cb872e9006b43623ead66af11ce425b1efbcd4c35e63a6eb6e93e372
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Tauri system packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libfuse2
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: karlsen-wasm
+          path: karlsen-wasm
+
+      - name: karlsend sidecar (pinned release, SHA-256 checked)
+        env:
+          KARLSEND_URL: ${{ env.KARLSEND_RELEASE }}/${{ matrix.karlsend_asset }}
+          KARLSEND_SHA256: ${{ matrix.karlsend_sha256 }}
+        run: scripts/fetch-karlsend.sh
+
+      - name: KarlsenMiner sidecar (pinned release, SHA-256 checked)
+        run: scripts/fetch-miner.sh
+
+      - name: Wallet + SDK
+        run: KARLSEN_WASM_DIR="$PWD/karlsen-wasm" scripts/build-wallet.sh
+
+      - name: UI packages
+        run: npm --prefix ui ci
+
+      - name: Backend tests
+        run: cd src-tauri && cargo test --locked
+
+      - name: Build installers
+        run: cd src-tauri && npx --yes @tauri-apps/cli@2 build
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          find src-tauri/target/release/bundle -maxdepth 2 -type f \
+            \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.AppImage' -o -name '*.deb' \) -exec cp {} dist/ \;
+          ls -la dist
+          test -n "$(ls dist)"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    if: github.ref == 'refs/heads/release/desktop' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: installers-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Draft release v<version>
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n1)"
+          tag="v$ver"
+          if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -q false; then
+            echo "Release $tag is already published. Bump the version instead of replacing released files." >&2
+            exit 1
+          fi
+          gh release delete "$tag" --yes 2>/dev/null || true
+          gh release create "$tag" dist/* --draft --target "$GITHUB_SHA" --title "Karlsen Desktop $tag" \
+            --notes "Built by GitHub Actions from commit $GITHUB_SHA. Draft: test the installers before publishing."

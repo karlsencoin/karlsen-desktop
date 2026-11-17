@@ -5,6 +5,8 @@
 # Usage:
 #   scripts/fetch-karlsend.sh /path/to/karlsend            # use a local build
 #   KARLSEND_URL=https://.../karlsend.zip scripts/fetch-karlsend.sh   # download a release archive
+#   KARLSEND_SHA256=<hex> with KARLSEND_URL: refuse the download unless the archive has this
+#   SHA-256 (release builds must set it; see .github/workflows/release.yml)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,6 +22,13 @@ elif [[ -n "${KARLSEND_URL:-}" ]]; then
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   curl -fsSL "$KARLSEND_URL" -o "$TMP/pkg"
+  if [[ -n "${KARLSEND_SHA256:-}" ]]; then
+    actual="$(sha256sum "$TMP/pkg" | cut -d' ' -f1)"
+    if [[ "$actual" != "$KARLSEND_SHA256" ]]; then
+      echo "REFUSED: $KARLSEND_URL has SHA-256 $actual, expected $KARLSEND_SHA256" >&2
+      exit 1
+    fi
+  fi
   case "$KARLSEND_URL" in
     *.zip) unzip -q "$TMP/pkg" -d "$TMP/x" ;;
     *.tar.gz|*.tgz) mkdir -p "$TMP/x" && tar -xzf "$TMP/pkg" -C "$TMP/x" ;;

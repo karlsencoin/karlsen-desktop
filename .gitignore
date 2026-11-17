@@ -5,7 +5,6 @@ ui/public/karlsen-wasm/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/binaries/karlsend-*
-src-tauri/binaries/karlsen-stratum-bridge-*
 src-tauri/binaries/karlsenminer-*
 .env
 *.env

@@ -106,16 +106,12 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdRes
     Ok(())
 }
 
-/// Start solo mining on the local node: bridge first, then the miner once the node is synced.
+/// Start solo mining on the local node. The miner waits by itself until the node is synced.
 async fn start_miner_from_settings(app: &AppHandle, state: &AppState) -> anyhow::Result<()> {
     let s = state.miner_settings.lock().await.clone();
     let node_rpc_listen = state.settings.lock().await.rpc_listen.clone();
     let work_dir = state.miner.work_dir();
-    let launch = miner::Launch {
-        bridge_args: s.bridge_args(&node_rpc_listen, work_dir).map_err(anyhow::Error::msg)?,
-        miner_args: s.miner_args(work_dir).map_err(anyhow::Error::msg)?,
-        stratum_port: s.stratum_port,
-    };
+    let launch = miner::Launch { miner_args: s.miner_args(&node_rpc_listen, work_dir).map_err(anyhow::Error::msg)? };
     state.miner.start(app, launch).await
 }
 
@@ -179,7 +175,7 @@ pub fn run() {
             let auto_start = settings.auto_start_node;
             let miner_settings = MinerSettings::load(&config_dir);
             let auto_start_miner = miner_settings.auto_start;
-            // Working folder of the miner and the bridge (local, non-roaming data).
+            // Working folder of the miner (local, non-roaming data).
             let miner_root = app.path().app_local_data_dir()?.join("miner");
 
             app.manage(AppState {
@@ -267,8 +263,8 @@ pub fn run() {
             let app = app.clone();
             tauri::async_runtime::block_on(async move {
                 let state = app.state::<AppState>();
-                // Mining first (miner, then bridge): the bridge must not lose its node mid-submit,
-                // and karlsend then gets its full shutdown window.
+                // Mining first: the miner must not lose its node mid-submit, and karlsend then
+                // gets its full shutdown window.
                 let _ = state.miner.stop(&app).await;
                 let _ = state.node.stop(&app).await;
             });

@@ -25,6 +25,8 @@ interface NodeInfo {
 
 function stateLabel(status: MinerStatus): string {
   switch (status.state) {
+    case "starting":
+      return "STARTING GPUS";
     case "waiting":
       return "WAITING FOR NODE SYNC";
     case "running":
@@ -160,7 +162,9 @@ export function MinerPage({ rpcUrl, nodeRunning }: { rpcUrl: string; nodeRunning
 
   let nodeHint: string | null = null;
   if (!nodeRunning) nodeHint = "The node is not running. Start it on the KARLSEN tab; mining begins once it is fully synced.";
-  else if (node && !node.isSynced) nodeHint = "The node is still syncing. Mining begins by itself once it is fully synced.";
+  else if (status.state === "waiting" || (node && !node.isSynced))
+    nodeHint = "The node is still syncing. The GPUs stay idle until it is fully synced, then mining begins by itself.";
+  else if (status.state === "starting") nodeHint = "The node is synced. The GPUs are being prepared (building the DAG takes about a minute).";
 
   return (
     <div className="page settings miner-page">
@@ -170,9 +174,8 @@ export function MinerPage({ rpcUrl, nodeRunning }: { rpcUrl: string; nodeRunning
             Solo Mining · <span className={`state-${status.state}`}>{stateLabel(status)}</span>
           </div>
           <div className="node-sub">
-            KarlsenMiner v{status.minerVersion} → Karlsen Stratum Bridge v{status.bridgeVersion} → your own node · no pool, no fee
-            {status.minerPid != null ? ` · miner pid ${status.minerPid}` : ""}
-            {status.bridgePid != null ? ` · bridge pid ${status.bridgePid}` : ""}
+            KarlsenMiner v{status.minerVersion} → your own node · no pool, no stratum bridge, no fee
+            {status.minerPid != null ? ` · pid ${status.minerPid}` : ""}
           </div>
         </div>
         <div className="actions">
@@ -200,11 +203,10 @@ export function MinerPage({ rpcUrl, nodeRunning }: { rpcUrl: string; nodeRunning
             value={node?.blockRewardSompi != null ? `${formatKls(BigInt(node.blockRewardSompi))} KLS` : "—"}
             sub="Paid to your mining address per block found"
           />
-          <Tile label="Blocks Found" value={formatInt(status.blocksFound)} sub="Since Karlsen Desktop started" />
           <Tile
-            label="Shares (Accepted / Rejected)"
-            value={status.accepted != null ? `${formatInt(status.accepted)} / ${formatInt(status.rejected ?? 0)}` : "—"}
-            sub="Shares only measure hashrate"
+            label="Blocks Found"
+            value={formatInt(status.blocksFound)}
+            sub={status.blocksRejected > 0 ? `${formatInt(status.blocksRejected)} rejected by the node · since Karlsen Desktop started` : "Since Karlsen Desktop started"}
           />
           <Tile label="Mining Uptime" value={status.uptimeSecs != null ? formatUptime(status.uptimeSecs) : "—"} />
         </div>
@@ -255,21 +257,13 @@ export function MinerPage({ rpcUrl, nodeRunning }: { rpcUrl: string; nodeRunning
             placeholder="off"
             onChange={(e) => set("gpuOffTemp", e.target.value === "" ? null : Number(e.target.value))}
           />
-          <span>Stratum port (local)</span>
-          <input
-            type="number"
-            min={1024}
-            max={65535}
-            value={settings.stratumPort}
-            onChange={(e) => set("stratumPort", Number(e.target.value))}
-          />
         </div>
         <p className="help">
           You mine directly on the node inside Karlsen Desktop. Every block you find is submitted by your own node and
           its full reward goes to the mining address; use a receive address from the WALLET tab. The address is checked
           (including its checksum) before mining starts. There are no pool payouts in between: you earn only when you
-          find a block. The stratum port is used between the miner and the bridge on this computer only
-          (127.0.0.1) and is not reachable from the network.
+          find a block, and a single GPU can go a long time without one (see Average Time Per Block). The miner
+          talks to the node on this computer only (127.0.0.1).
         </p>
         <label>
           <input type="checkbox" checked={settings.autoStart} onChange={(e) => set("autoStart", e.target.checked)} />
@@ -282,14 +276,14 @@ export function MinerPage({ rpcUrl, nodeRunning }: { rpcUrl: string; nodeRunning
       </section>
 
       <section>
-        <h2>Miner and Bridge Output</h2>
+        <h2>Miner Output</h2>
         <pre ref={logBox} className="log miner-log">
           {lines.length === 0 && <div className="hint">No output yet.</div>}
           {lines.map((l, i) => (
             <div
               key={i}
               className={
-                l.includes("ERROR") ? "log-err" : l.startsWith("DESKTOP:") ? "log-desktop" : l.startsWith("BRIDGE:") ? "log-bridge" : ""
+                l.includes("ERROR") ? "log-err" : l.startsWith("DESKTOP:") ? "log-desktop" : l.includes("Block accepted") ? "log-block" : ""
               }
             >
               {l}
