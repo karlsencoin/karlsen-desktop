@@ -66,7 +66,8 @@ fi
 
 mkdir -p "$TMP/x"
 case "$ARCHIVE" in
-  *.zip) unzip -q -o "$PKG" -d "$TMP/x" ;;
+  # unzip exits 1 for warnings only (e.g. a zip made by PowerShell with backslash paths).
+  *.zip) unzip -q -o "$PKG" -d "$TMP/x" || [[ $? -eq 1 ]] ;;
   *) tar -xzf "$PKG" -C "$TMP/x" ;;
 esac
 BIN="$(find "$TMP/x" -type f -name "karlsenminer${EXT}" | head -n1)"
