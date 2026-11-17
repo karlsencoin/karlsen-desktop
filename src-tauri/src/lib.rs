@@ -4,7 +4,6 @@ mod child;
 mod emission;
 mod job;
 mod miner;
-mod miner_install;
 mod miner_settings;
 mod node;
 mod settings;
@@ -107,9 +106,17 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdRes
     Ok(())
 }
 
+/// Start solo mining on the local node: bridge first, then the miner once the node is synced.
 async fn start_miner_from_settings(app: &AppHandle, state: &AppState) -> anyhow::Result<()> {
     let s = state.miner_settings.lock().await.clone();
-    state.miner.start(app, |config_file| s.miner_args(config_file)).await
+    let node_rpc_listen = state.settings.lock().await.rpc_listen.clone();
+    let work_dir = state.miner.work_dir();
+    let launch = miner::Launch {
+        bridge_args: s.bridge_args(&node_rpc_listen, work_dir).map_err(anyhow::Error::msg)?,
+        miner_args: s.miner_args(work_dir).map_err(anyhow::Error::msg)?,
+        stratum_port: s.stratum_port,
+    };
+    state.miner.start(app, launch).await
 }
 
 #[tauri::command]
@@ -120,23 +127,6 @@ async fn miner_status(state: State<'_, AppState>) -> CmdResult<MinerStatus> {
 #[tauri::command]
 fn miner_logs(state: State<'_, AppState>) -> Vec<String> {
     state.miner.logs()
-}
-
-/// Built-in pool list for the MINER tab.
-#[tauri::command]
-fn miner_pools() -> &'static [miner_settings::Pool] {
-    miner_settings::POOLS
-}
-
-/// Download the pinned KarlsenMiner release, verify its SHA-256 and install it.
-#[tauri::command]
-async fn miner_install(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.miner.install(&app).await.map_err(err)
-}
-
-#[tauri::command]
-async fn miner_uninstall(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
-    state.miner.uninstall(&app).await.map_err(err)
 }
 
 #[tauri::command]
@@ -189,7 +179,7 @@ pub fn run() {
             let auto_start = settings.auto_start_node;
             let miner_settings = MinerSettings::load(&config_dir);
             let auto_start_miner = miner_settings.auto_start;
-            // Local (non-roaming) data: the miner executable must not sync with a profile.
+            // Working folder of the miner and the bridge (local, non-roaming data).
             let miner_root = app.path().app_local_data_dir()?.join("miner");
 
             app.manage(AppState {
@@ -263,9 +253,6 @@ pub fn run() {
             block_reward_info,
             miner_status,
             miner_logs,
-            miner_pools,
-            miner_install,
-            miner_uninstall,
             miner_start,
             miner_stop,
             get_miner_settings,
@@ -280,7 +267,8 @@ pub fn run() {
             let app = app.clone();
             tauri::async_runtime::block_on(async move {
                 let state = app.state::<AppState>();
-                // Miner first: it is quick, and karlsend then gets its full shutdown window.
+                // Mining first (miner, then bridge): the bridge must not lose its node mid-submit,
+                // and karlsend then gets its full shutdown window.
                 let _ = state.miner.stop(&app).await;
                 let _ = state.node.stop(&app).await;
             });

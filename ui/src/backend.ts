@@ -39,39 +39,37 @@ export interface BlockRewardInfo {
   secondsUntilNextReduction: number | null;
 }
 
-export type MinerState = "stopped" | "starting" | "running" | "stopping" | "crashed";
-
-export interface MinerInstallProgress {
-  stage: "downloading" | "verifying" | "extracting";
-  receivedBytes: number;
-  totalBytes: number | null;
-}
+export type MinerState = "stopped" | "starting" | "waiting" | "running" | "stopping" | "crashed";
 
 export interface MinerStatus {
-  /** False on platforms KarlsenMiner has no build for. */
-  supported: boolean;
-  /** KarlsenMiner version this Desktop build installs and runs. */
-  version: string;
-  installed: boolean;
-  install: MinerInstallProgress | null;
+  /** Versions of the bundled KarlsenMiner and Karlsen stratum bridge. */
+  minerVersion: string;
+  bridgeVersion: string;
+  /** "waiting" = the bridge runs and waits for the node to be reachable and fully synced. */
   state: MinerState;
-  pid: number | null;
+  minerPid: number | null;
+  bridgePid: number | null;
+  /** Seconds since the miner started hashing in the current session. */
   uptimeSecs: number | null;
   /** Total hashrate in MH/s from the miner's latest status line. */
   hashrateMhs: number | null;
+  /** Shares only measure the hashrate; rewards come from blocks. */
   accepted: number | null;
   rejected: number | null;
+  /** Blocks this node accepted from the miner since Karlsen Desktop started. */
+  blocksFound: number;
   restarts: number;
   /** An automatic restart is scheduled after an unexpected exit. */
   restartPending: boolean;
-  lastExitCode: number | null;
   lastError: string | null;
 }
 
 export interface MinerSettings {
+  /** Karlsen address that receives the block rewards. */
   miningAddress: string;
   workerName: string;
-  poolUrl: string;
+  /** Loopback TCP port of the bundled stratum bridge. */
+  stratumPort: number;
   /** KarlsenMiner -d value: all | amd | nvidia | intel | amd:0,1 | nvidia:0 | 0,1,3 */
   devices: string;
   /** Pause a GPU at this core temperature (°C); null = miner default. */
@@ -79,26 +77,15 @@ export interface MinerSettings {
   autoStart: boolean;
 }
 
-export interface MinerPool {
-  name: string;
-  payout: string;
-  url: string;
-}
-
 export const minerBackend = {
   status: () => invoke<MinerStatus>("miner_status"),
   logs: () => invoke<string[]>("miner_logs"),
-  pools: () => invoke<MinerPool[]>("miner_pools"),
-  install: () => invoke<void>("miner_install"),
-  uninstall: () => invoke<void>("miner_uninstall"),
   start: () => invoke<void>("miner_start"),
   stop: () => invoke<void>("miner_stop"),
   getSettings: () => invoke<MinerSettings>("get_miner_settings"),
   saveSettings: (settings: MinerSettings) => invoke<void>("save_miner_settings", { settings }),
   onStatus: (cb: (s: MinerStatus) => void): Promise<UnlistenFn> =>
     listen<MinerStatus>("miner-status", (e) => cb(e.payload)),
-  onInstallProgress: (cb: (p: MinerInstallProgress) => void): Promise<UnlistenFn> =>
-    listen<MinerInstallProgress>("miner-install", (e) => cb(e.payload)),
   onLog: (cb: (line: string) => void): Promise<UnlistenFn> =>
     listen<string>("miner-log", (e) => cb(e.payload)),
 };

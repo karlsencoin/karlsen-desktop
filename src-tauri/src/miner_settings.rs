@@ -1,40 +1,27 @@
-//! Miner settings (stored as `miner.json` in the app config directory) and their
-//! translation into a KarlsenMiner command line.
+//! Mining settings (stored as `miner.json` in the app config directory) and their
+//! translation into the KarlsenMiner and karlsen-stratum-bridge command lines.
 //!
-//! Every value that ends up on the command line is validated here, in the backend, so the
-//! webview cannot pass arbitrary options to the miner process.
+//! Every value that ends up on a command line is validated here, in the backend, so the
+//! webview cannot pass arbitrary options to either process.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const FILE_NAME: &str = "miner.json";
 
-/// A pool offered in the MINER tab. Same list as karlsen-cpu-miner's setup wizard.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Pool {
-    pub name: &'static str,
-    pub payout: &'static str,
-    pub url: &'static str,
-}
-
-pub const POOLS: &[Pool] = &[
-    Pool { name: "WoolyPooly", payout: "PPLNS, 0.9%", url: "stratum+ssl://pool.woolypooly.com:3132" },
-    Pool { name: "TazMining (Switzerland)", payout: "PPLNS, 0.75%", url: "stratum+tcp://pool.tazmining.ch:7260" },
-    Pool { name: "Cedric-Crispin", payout: "PPLNS, 0.1%", url: "stratum+ssl://karlsencoin.cedric-crispin.com:4155" },
-    Pool { name: "NushyPool (Europe)", payout: "PPS, 1.0%", url: "stratum+tcp://nushypool.com:40007" },
-];
+/// Default loopback port of the bundled stratum bridge (the bridge's own default).
+pub const DEFAULT_STRATUM_PORT: u16 = 5555;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct MinerSettings {
-    /// Karlsen address that receives the mining rewards. Empty until the user enters one;
+    /// Karlsen address that receives the block rewards. Empty until the user enters one;
     /// mining never starts without it.
     pub mining_address: String,
-    /// Rig (worker) name shown on the pool's dashboard.
+    /// Rig (worker) name; appears in the bridge log and in the coinbase tag of found blocks.
     pub worker_name: String,
-    /// Pool stratum URL: one of `POOLS` or a custom `stratum+tcp://` / `stratum+ssl://` URL.
-    pub pool_url: String,
+    /// Loopback TCP port the bundled stratum bridge listens on.
+    pub stratum_port: u16,
     /// KarlsenMiner `-d` value: all | amd | nvidia | intel | amd:0,1 | nvidia:0 | 0,1,3
     pub devices: String,
     /// Pause a GPU at this core temperature in °C (`--gpu-off-temp`). `None` = miner default.
@@ -48,7 +35,7 @@ impl Default for MinerSettings {
         Self {
             mining_address: String::new(),
             worker_name: "desktop".into(),
-            pool_url: POOLS[0].url.into(),
+            stratum_port: DEFAULT_STRATUM_PORT,
             devices: "all".into(),
             gpu_off_temp: None,
             auto_start: false,
@@ -77,7 +64,9 @@ impl MinerSettings {
     pub fn validate(&self) -> Result<(), String> {
         validate_address(self.mining_address.trim())?;
         validate_worker_name(self.worker_name.trim())?;
-        validate_pool_url(self.pool_url.trim())?;
+        if self.stratum_port < 1024 {
+            return Err("The stratum port must be between 1024 and 65535.".into());
+        }
         validate_devices(self.devices.trim())?;
         if let Some(t) = self.gpu_off_temp {
             if !(50..=100).contains(&t) {
@@ -87,7 +76,7 @@ impl MinerSettings {
         Ok(())
     }
 
-    /// Build the KarlsenMiner command line.
+    /// Build the KarlsenMiner command line: mine on the bundled bridge at 127.0.0.1.
     ///
     /// `--config` points at a file inside Desktop's own miner folder so a
     /// `karlsenminer_config.json` left somewhere else is never picked up, and `--log off`
@@ -95,15 +84,15 @@ impl MinerSettings {
     /// offered: they make the miner ask for administrator rights and restart itself, which
     /// detaches it from Desktop, and a miner stopped by Desktop on Windows cannot restore
     /// the previous clocks.
-    pub fn miner_args(&self, config_file: &Path) -> Result<Vec<String>, String> {
+    pub fn miner_args(&self, work_dir: &Path) -> Result<Vec<String>, String> {
         self.validate()?;
         let mut args = vec![
             "--config".to_string(),
-            config_file.display().to_string(),
+            work_dir.join("karlsenminer_config.json").display().to_string(),
             "--log".to_string(),
             "off".to_string(),
             "-o".to_string(),
-            self.pool_url.trim().to_string(),
+            format!("stratum+tcp://127.0.0.1:{}", self.stratum_port),
             "-u".to_string(),
             format!("{}.{}", self.mining_address.trim(), self.worker_name.trim()),
             "-d".to_string(),
@@ -114,6 +103,45 @@ impl MinerSettings {
             args.push(t.to_string());
         }
         Ok(args)
+    }
+
+    /// Build the karlsen-stratum-bridge command line.
+    ///
+    /// `node_rpc_listen` is the node's gRPC listen address from the node settings; the bridge
+    /// always dials it on 127.0.0.1. The stratum listener is bound to 127.0.0.1 as well, so
+    /// nothing on the network can connect to it, and every optional HTTP server of the bridge
+    /// (Prometheus, dashboard, health check) is switched off.
+    ///
+    /// `--solo-mining false` keeps the bridge's variable share difficulty: the miner then
+    /// submits frequent low-difficulty shares, which only serve to measure the hashrate and
+    /// show that the GPU works. Rewards are the same either way; every block goes to this
+    /// node and pays the mining address.
+    ///
+    /// `--config` names a file in Desktop's miner folder that does not exist, so the bridge
+    /// runs on its built-in defaults plus these flags and never loads a stray `config.yaml`.
+    pub fn bridge_args(&self, node_rpc_listen: &str, work_dir: &Path) -> Result<Vec<String>, String> {
+        self.validate()?;
+        let node_port = node_rpc_listen
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .filter(|p| *p != 0)
+            .ok_or_else(|| format!("The node's gRPC address \"{node_rpc_listen}\" has no valid port (see Settings)."))?;
+        let flag = |name: &str, value: &str| [name.to_string(), value.to_string()];
+        Ok([
+            flag("--config", &work_dir.join("bridge-config.yaml").display().to_string()),
+            flag("--karlsend-address", &format!("127.0.0.1:{node_port}")),
+            flag("--stratum-port", &format!("127.0.0.1:{}", self.stratum_port)),
+            flag("--solo-mining", "false"),
+            flag("--var-diff", "true"),
+            flag("--prom-port", ""),
+            flag("--web-dashboard-port", ""),
+            flag("--health-check-port", ""),
+            flag("--log-to-file", "false"),
+            flag("--print-stats", "false"),
+            flag("--coinbase-tag-suffix", "KarlsenDesktop"),
+        ]
+        .concat())
     }
 }
 
@@ -173,21 +201,6 @@ fn validate_worker_name(name: &str) -> Result<(), String> {
     }
 }
 
-fn validate_pool_url(url: &str) -> Result<(), String> {
-    let bad = || "The pool must look like stratum+ssl://host:port or stratum+tcp://host:port.".to_string();
-    let rest = url.strip_prefix("stratum+ssl://").or_else(|| url.strip_prefix("stratum+tcp://")).ok_or_else(bad)?;
-    let (host, port) = rest.rsplit_once(':').ok_or_else(bad)?;
-    let host_ok = (1..=253).contains(&host.len())
-        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        && !host.starts_with(['-', '.']);
-    let port_ok = port.parse::<u16>().is_ok_and(|p| p != 0) && port.bytes().all(|b| b.is_ascii_digit());
-    if host_ok && port_ok {
-        Ok(())
-    } else {
-        Err(bad())
-    }
-}
-
 /// Accepts exactly the forms KarlsenMiner documents for `-d`.
 fn validate_devices(devices: &str) -> Result<(), String> {
     let is_index_list =
@@ -229,22 +242,25 @@ mod tests {
     #[test]
     fn default_settings_need_an_address() {
         let s = MinerSettings::default();
-        assert!(s.miner_args(Path::new("/x/cfg.json")).is_err());
+        assert!(s.miner_args(Path::new("/x")).is_err());
+        assert!(s.bridge_args("127.0.0.1:42110", Path::new("/x")).is_err());
         assert!(!s.auto_start);
+        assert_eq!(s.stratum_port, 5555);
     }
 
     #[test]
-    fn builds_command_line() {
+    fn miner_mines_on_the_local_bridge() {
         let mut s = valid();
         s.worker_name = "rig-1".into();
         s.devices = "amd:0,1".into();
         s.gpu_off_temp = Some(80);
-        let args = s.miner_args(Path::new("/x/cfg.json")).unwrap();
+        s.stratum_port = 5600;
+        let args = s.miner_args(Path::new("/x")).unwrap();
         assert_eq!(
             args,
             [
-                "--config", "/x/cfg.json", "--log", "off",
-                "-o", "stratum+ssl://pool.woolypooly.com:3132",
+                "--config", "/x/karlsenminer_config.json", "--log", "off",
+                "-o", "stratum+tcp://127.0.0.1:5600",
                 "-u", &format!("{TREASURY}.rig-1"),
                 "-d", "amd:0,1",
                 "--gpu-off-temp", "80",
@@ -253,18 +269,28 @@ mod tests {
     }
 
     #[test]
+    fn bridge_is_loopback_only_and_dials_the_local_node() {
+        let s = valid();
+        // Even when the node's RPC is bound to all interfaces, the bridge dials loopback.
+        let args = s.bridge_args("0.0.0.0:42999", Path::new("/x")).unwrap();
+        let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].as_str();
+        assert_eq!(value("--karlsend-address"), "127.0.0.1:42999");
+        assert_eq!(value("--stratum-port"), "127.0.0.1:5555");
+        assert_eq!(value("--config"), "/x/bridge-config.yaml");
+        for off in ["--prom-port", "--web-dashboard-port", "--health-check-port"] {
+            assert_eq!(value(off), "", "{off} must be disabled");
+        }
+        assert_eq!(value("--log-to-file"), "false");
+        assert!(s.bridge_args("no-port", Path::new("/x")).is_err());
+        assert!(s.bridge_args("127.0.0.1:0", Path::new("/x")).is_err());
+    }
+
+    #[test]
     fn rejects_values_that_could_become_options() {
         for (field, value) in [
             ("worker", "--pl 300"),
             ("worker", "a b"),
             ("worker", ""),
-            ("pool", "--wizard"),
-            ("pool", "pool.woolypooly.com:3132"),
-            ("pool", "stratum+ssl://-evil:3132"),
-            ("pool", "stratum+ssl://host:0"),
-            ("pool", "stratum+ssl://host:99999"),
-            ("pool", "stratum+ssl://host:31 32"),
-            ("pool", "http://host:80"),
             ("devices", "--benchmark"),
             ("devices", "amd:"),
             ("devices", "gpu0"),
@@ -273,7 +299,6 @@ mod tests {
             let mut s = valid();
             match field {
                 "worker" => s.worker_name = value.into(),
-                "pool" => s.pool_url = value.into(),
                 _ => s.devices = value.into(),
             }
             assert!(s.validate().is_err(), "{field} = {value:?} must be rejected");
@@ -281,30 +306,31 @@ mod tests {
         let mut s = valid();
         s.gpu_off_temp = Some(20);
         assert!(s.validate().is_err());
+        let mut s = valid();
+        s.stratum_port = 80;
+        assert!(s.validate().is_err());
     }
 
     #[test]
-    fn accepts_documented_device_forms_and_all_pools() {
+    fn accepts_documented_device_forms() {
         for d in ["all", "amd", "nvidia", "intel", "amd:0,1", "nvidia:0", "all:0,1", "0,1,3"] {
             let mut s = valid();
             s.devices = d.into();
             s.validate().unwrap_or_else(|e| panic!("{d}: {e}"));
         }
-        for p in POOLS {
-            validate_pool_url(p.url).unwrap();
-        }
     }
 
     #[test]
-    fn settings_round_trip_and_tolerate_missing_fields() {
+    fn settings_round_trip_and_tolerate_old_or_missing_fields() {
         let dir = std::env::temp_dir().join(format!("kd-miner-settings-{}", std::process::id()));
         let s = MinerSettings { gpu_off_temp: Some(75), auto_start: true, ..valid() };
         s.save(&dir).unwrap();
         assert_eq!(MinerSettings::load(&dir), s);
-        std::fs::write(dir.join(FILE_NAME), r#"{"workerName":"x"}"#).unwrap();
+        // "poolUrl" is from an earlier development build; unknown fields are ignored.
+        std::fs::write(dir.join(FILE_NAME), r#"{"workerName":"x","poolUrl":"stratum+ssl://p:1"}"#).unwrap();
         let partial = MinerSettings::load(&dir);
         assert_eq!(partial.worker_name, "x");
-        assert_eq!(partial.pool_url, POOLS[0].url);
+        assert_eq!(partial.stratum_port, DEFAULT_STRATUM_PORT);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -29,7 +29,7 @@ h2 { font-size: 16px; font-weight: 500; text-transform: uppercase; letter-spacin
 .node-sub { font-size: 12px; color: var(--muted); font-family: monospace; margin-top: 2px; }
 .state-running { color: var(--accent); }
 .state-crashed { color: var(--err); }
-.state-starting, .state-stopping { color: var(--warn); }
+.state-starting, .state-stopping, .state-waiting { color: var(--warn); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 .tile { border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px 8px; }
 .tile-label { font-size: 11px; text-transform: uppercase; color: var(--muted); }
@@ -70,5 +70,5 @@ input.wide { width: 100%; }
 .miner-row input { flex: 1 1 auto; min-width: 0; }
 .miner-row input[readonly] { color: var(--muted); }
 .miner-log { height: 260px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: monospace; }
-.progress { height: 8px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; max-width: 640px; margin-top: 8px; }
-.progress > div { height: 100%; background: var(--accent); transition: width 0.15s linear; }
+.log-bridge { color: var(--muted); }
+.miner-page > .hint { margin: 0 0 10px; }

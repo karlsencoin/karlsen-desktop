@@ -1,18 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import {
-  minerBackend,
-  type MinerInstallProgress,
-  type MinerPool,
-  type MinerSettings,
-  type MinerStatus,
-} from "./backend";
+import { backend, minerBackend, type MinerSettings, type MinerStatus } from "./backend";
 import { Tile } from "./Dashboard";
-import { formatInt, formatUptime } from "./format";
+import { formatDuration, formatHashrate, formatInt, formatKls, formatUptime } from "./format";
+import { NodeRpc } from "./rpc";
 
 const POLL_MS = 2000;
-const MAX_LINES = 2000;
-const RELEASE_URL = "https://github.com/karlsencoin/karlsen-miner/releases";
+const NODE_POLL_MS = 10_000;
+const MAX_LINES = 3000;
 const DEVICE_PRESETS = [
   { value: "all", label: "All GPUs" },
   { value: "amd", label: "AMD only" },
@@ -21,50 +15,57 @@ const DEVICE_PRESETS = [
 ];
 const CUSTOM = "custom";
 
-function formatMiB(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function installLabel(p: MinerInstallProgress): string {
-  if (p.stage !== "downloading") return "Verifying SHA-256 and installing…";
-  return p.totalBytes
-    ? `Downloading… ${formatMiB(p.receivedBytes)} of ${formatMiB(p.totalBytes)}`
-    : `Downloading… ${formatMiB(p.receivedBytes)}`;
+/** What the miner needs to know about the local node. */
+interface NodeInfo {
+  isSynced: boolean;
+  networkHashesPerSecond: bigint | null;
+  /** Reward of the next block in sompi. */
+  blockRewardSompi: number | null;
 }
 
 function stateLabel(status: MinerStatus): string {
-  if (status.install) return "INSTALLING";
-  if (!status.installed) return "NOT INSTALLED";
-  // An exit Desktop will not retry (e.g. no GPU) is a failed start, not a crash loop.
-  if (status.state === "crashed" && !status.restartPending) return "FAILED";
-  return status.state.toUpperCase();
+  switch (status.state) {
+    case "waiting":
+      return "WAITING FOR NODE SYNC";
+    case "running":
+      return "MINING";
+    case "crashed":
+      // An exit Desktop will not retry (e.g. no GPU) is a failed start, not a crash loop.
+      return status.restartPending ? "RESTARTING" : "FAILED";
+    default:
+      return status.state.toUpperCase();
+  }
 }
 
-export function MinerPage() {
+/**
+ * Average time between blocks found at this hashrate. Karlsen mainnet produces one block per
+ * second, so a miner with share s of the network hashrate finds one block every 1/s seconds
+ * on average. Solo mining is luck: the real gaps vary widely around this average.
+ */
+function averageSecondsPerBlock(hashrateMhs: number | null, networkHps: bigint | null): number | null {
+  if (!hashrateMhs || !networkHps || networkHps <= 0n) return null;
+  return Number(networkHps) / (hashrateMhs * 1e6);
+}
+
+export function MinerPage({ rpcUrl, nodeRunning }: { rpcUrl: string; nodeRunning: boolean }) {
   const [status, setStatus] = useState<MinerStatus | null>(null);
   const [settings, setSettings] = useState<MinerSettings | null>(null);
-  const [pools, setPools] = useState<MinerPool[]>([]);
+  const [node, setNode] = useState<NodeInfo | null>(null);
   const [lines, setLines] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [customPool, setCustomPool] = useState(false);
   const [customDevices, setCustomDevices] = useState(false);
   const logBox = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     minerBackend.status().then(setStatus);
     minerBackend.logs().then(setLines);
-    Promise.all([minerBackend.pools(), minerBackend.getSettings()]).then(([p, s]) => {
-      setPools(p);
+    minerBackend.getSettings().then((s) => {
       setSettings(s);
-      setCustomPool(!p.some((pool) => pool.url === s.poolUrl));
       setCustomDevices(!DEVICE_PRESETS.some((d) => d.value === s.devices));
     });
     const unStatus = minerBackend.onStatus(setStatus);
-    const unInstall = minerBackend.onInstallProgress((install) =>
-      setStatus((prev) => (prev ? { ...prev, install } : prev)),
-    );
     const unLog = minerBackend.onLog((line) =>
       setLines((prev) => {
         const next = prev.length >= MAX_LINES ? prev.slice(prev.length - MAX_LINES + 1) : prev.slice();
@@ -76,11 +77,43 @@ export function MinerPage() {
     const id = setInterval(() => minerBackend.status().then(setStatus), POLL_MS);
     return () => {
       unStatus.then((f) => f());
-      unInstall.then((f) => f());
       unLog.then((f) => f());
       clearInterval(id);
     };
   }, []);
+
+  // Sync state, network hashrate and block reward from the local node.
+  useEffect(() => {
+    if (!nodeRunning) {
+      setNode(null);
+      return;
+    }
+    const rpc = new NodeRpc(rpcUrl);
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        await rpc.connect();
+        const m = await rpc.metrics();
+        const reward = await backend.blockRewardInfo(m.virtualDaaScore);
+        if (!cancelled) {
+          setNode({
+            isSynced: m.isSynced,
+            networkHashesPerSecond: m.networkHashesPerSecond,
+            blockRewardSompi: reward.currentRewardSompi,
+          });
+        }
+      } catch {
+        if (!cancelled) setNode(null);
+      }
+    };
+    void poll();
+    const id = setInterval(poll, NODE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      void rpc.disconnect();
+    };
+  }, [rpcUrl, nodeRunning]);
 
   useEffect(() => {
     if (logBox.current) logBox.current.scrollTop = logBox.current.scrollHeight;
@@ -120,39 +153,30 @@ export function MinerPage() {
       await minerBackend.start();
     });
 
-  const uninstall = () => {
-    if (window.confirm(`Remove KarlsenMiner v${status.version} from this computer? Your miner settings are kept.`)) {
-      void run(minerBackend.uninstall);
-    }
-  };
-
-  const active = status.state === "running" || status.state === "starting" || status.state === "stopping";
+  const active = status.state === "starting" || status.state === "waiting" || status.state === "running" || status.state === "stopping";
   // A scheduled automatic restart is also something the user can stop.
   const stoppable = active || status.restartPending;
-  const installing = status.install != null;
-  const percent =
-    status.install?.totalBytes && status.install.stage === "downloading"
-      ? Math.min(100, (status.install.receivedBytes / status.install.totalBytes) * 100)
-      : installing
-        ? 100
-        : 0;
+  const perBlock = averageSecondsPerBlock(status.hashrateMhs, node?.networkHashesPerSecond ?? null);
+
+  let nodeHint: string | null = null;
+  if (!nodeRunning) nodeHint = "The node is not running. Start it on the KARLSEN tab; mining begins once it is fully synced.";
+  else if (node && !node.isSynced) nodeHint = "The node is still syncing. Mining begins by itself once it is fully synced.";
 
   return (
     <div className="page settings miner-page">
       <div className="node-header">
         <div>
           <div className="node-title">
-            KarlsenMiner v{status.version} · <span className={`state-${status.state}`}>{stateLabel(status)}</span>
+            Solo Mining · <span className={`state-${status.state}`}>{stateLabel(status)}</span>
           </div>
           <div className="node-sub">
-            GPU miner for Karlsen (KarlsenHashV2) · AMD, NVIDIA and Intel Arc · 6 GB+ VRAM
-            {status.pid != null ? ` · pid ${status.pid}` : ""}
+            KarlsenMiner v{status.minerVersion} → Karlsen Stratum Bridge v{status.bridgeVersion} → your own node · no pool, no fee
+            {status.minerPid != null ? ` · miner pid ${status.minerPid}` : ""}
+            {status.bridgePid != null ? ` · bridge pid ${status.bridgePid}` : ""}
           </div>
         </div>
         <div className="actions">
-          {status.installed && !stoppable && (
-            <button className="primary" disabled={busy || installing} onClick={start}>Start mining</button>
-          )}
+          {!stoppable && <button className="primary" disabled={busy} onClick={start}>Start mining</button>}
           {stoppable && (
             <button disabled={busy || status.state === "stopping"} onClick={() => run(minerBackend.stop)}>Stop mining</button>
           )}
@@ -160,44 +184,31 @@ export function MinerPage() {
       </div>
 
       {(error || status.lastError) && <div className="node-error">{error ?? status.lastError}</div>}
+      {stoppable && nodeHint && <div className="hint">{nodeHint}</div>}
 
-      {!status.supported && (
-        <div className="hint">KarlsenMiner is available for Windows x64 and Linux x64 only.</div>
-      )}
-
-      {status.supported && !status.installed && (
-        <section>
-          <h2>Install</h2>
-          <p className="help">
-            KarlsenMiner is not part of the Karlsen Desktop installer. Karlsen Desktop downloads the official
-            v{status.version} release from{" "}
-            <a href={RELEASE_URL} onClick={(e) => { e.preventDefault(); void openUrl(RELEASE_URL); }}>
-              github.com/karlsencoin/karlsen-miner
-            </a>{" "}
-            (about 2 MiB) and installs it only if its SHA-256 matches the value built into this version of Karlsen Desktop.
-            Antivirus software often reports GPU miners as "potentially unwanted"; if yours removes the file, allow it and
-            install again.
-          </p>
-          <div className="actions" style={{ marginTop: 10 }}>
-            <button className="primary" disabled={busy || installing} onClick={() => run(minerBackend.install)}>
-              {installing ? "Installing…" : `Download and install KarlsenMiner v${status.version}`}
-            </button>
-            {status.install && <span className="hint" style={{ marginTop: 0 }}>{installLabel(status.install)}</span>}
-          </div>
-          {installing && <div className="progress"><div style={{ width: `${percent}%` }} /></div>}
-        </section>
-      )}
-
-      {status.installed && (
-        <section>
-          <div className="tiles">
-            <Tile label="Hashrate" value={status.hashrateMhs != null ? `${status.hashrateMhs.toFixed(2)} MH/s` : "—"} />
-            <Tile label="Accepted Shares" value={status.accepted != null ? formatInt(status.accepted) : "—"} />
-            <Tile label="Rejected Shares" value={status.rejected != null ? formatInt(status.rejected) : "—"} />
-            <Tile label="Uptime" value={status.uptimeSecs != null ? formatUptime(status.uptimeSecs) : "—"} />
-          </div>
-        </section>
-      )}
+      <section>
+        <div className="tiles">
+          <Tile label="Your Hashrate" value={status.hashrateMhs != null ? `${status.hashrateMhs.toFixed(2)} MH/s` : "—"} />
+          <Tile label="Network Hashrate" value={node ? formatHashrate(node.networkHashesPerSecond) : "—"} />
+          <Tile
+            label="Average Time Per Block"
+            value={perBlock != null ? `~${formatDuration(Math.round(perBlock))}` : "—"}
+            sub="At your current hashrate; luck varies widely"
+          />
+          <Tile
+            label="Block Reward"
+            value={node?.blockRewardSompi != null ? `${formatKls(BigInt(node.blockRewardSompi))} KLS` : "—"}
+            sub="Paid to your mining address per block found"
+          />
+          <Tile label="Blocks Found" value={formatInt(status.blocksFound)} sub="Since Karlsen Desktop started" />
+          <Tile
+            label="Shares (Accepted / Rejected)"
+            value={status.accepted != null ? `${formatInt(status.accepted)} / ${formatInt(status.rejected ?? 0)}` : "—"}
+            sub="Shares only measure hashrate"
+          />
+          <Tile label="Mining Uptime" value={status.uptimeSecs != null ? formatUptime(status.uptimeSecs) : "—"} />
+        </div>
+      </section>
 
       <section>
         <h2>Mining Settings</h2>
@@ -211,29 +222,6 @@ export function MinerPage() {
           />
           <span>Rig name</span>
           <input value={settings.workerName} spellCheck={false} onChange={(e) => set("workerName", e.target.value.trim())} />
-          <span>Pool</span>
-          <div className="miner-row">
-            <select
-              value={customPool ? CUSTOM : settings.poolUrl}
-              onChange={(e) => {
-                const custom = e.target.value === CUSTOM;
-                setCustomPool(custom);
-                if (!custom) set("poolUrl", e.target.value);
-              }}
-            >
-              {pools.map((p) => (
-                <option key={p.url} value={p.url}>{p.name} ({p.payout})</option>
-              ))}
-              <option value={CUSTOM}>Custom pool…</option>
-            </select>
-            <input
-              value={settings.poolUrl}
-              readOnly={!customPool}
-              spellCheck={false}
-              placeholder="stratum+ssl://host:port"
-              onChange={(e) => set("poolUrl", e.target.value.trim())}
-            />
-          </div>
           <span>GPUs</span>
           <div className="miner-row">
             <select
@@ -267,10 +255,21 @@ export function MinerPage() {
             placeholder="off"
             onChange={(e) => set("gpuOffTemp", e.target.value === "" ? null : Number(e.target.value))}
           />
+          <span>Stratum port (local)</span>
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={settings.stratumPort}
+            onChange={(e) => set("stratumPort", Number(e.target.value))}
+          />
         </div>
         <p className="help">
-          Rewards are paid by the pool to the mining address. Use a receive address from the WALLET tab. The address is
-          checked (including its checksum) before mining starts. Pool fees and payout rules are set by each pool.
+          You mine directly on the node inside Karlsen Desktop. Every block you find is submitted by your own node and
+          its full reward goes to the mining address; use a receive address from the WALLET tab. The address is checked
+          (including its checksum) before mining starts. There are no pool payouts in between: you earn only when you
+          find a block. The stratum port is used between the miner and the bridge on this computer only
+          (127.0.0.1) and is not reachable from the network.
         </p>
         <label>
           <input type="checkbox" checked={settings.autoStart} onChange={(e) => set("autoStart", e.target.checked)} />
@@ -278,26 +277,26 @@ export function MinerPage() {
         </label>
         <div className="actions" style={{ marginTop: 10 }}>
           <button disabled={!dirty || busy} onClick={save}>Save</button>
-          {dirty && active && <span className="hint" style={{ marginTop: 0 }}>Changes apply the next time mining starts.</span>}
+          {dirty && stoppable && <span className="hint" style={{ marginTop: 0 }}>Changes apply the next time mining starts.</span>}
         </div>
       </section>
 
       <section>
-        <h2>Miner Output</h2>
+        <h2>Miner and Bridge Output</h2>
         <pre ref={logBox} className="log miner-log">
           {lines.length === 0 && <div className="hint">No output yet.</div>}
           {lines.map((l, i) => (
-            <div key={i} className={l.includes("ERROR") ? "log-err" : l.startsWith("DESKTOP:") ? "log-desktop" : ""}>{l}</div>
+            <div
+              key={i}
+              className={
+                l.includes("ERROR") ? "log-err" : l.startsWith("DESKTOP:") ? "log-desktop" : l.startsWith("BRIDGE:") ? "log-bridge" : ""
+              }
+            >
+              {l}
+            </div>
           ))}
         </pre>
       </section>
-
-      {status.installed && !stoppable && (
-        <section>
-          <h2>Maintenance</h2>
-          <button className="danger" disabled={busy} onClick={uninstall}>Remove KarlsenMiner</button>
-        </section>
-      )}
     </div>
   );
 }

@@ -83,7 +83,7 @@ export function App() {
       </header>
       <main>
         {tab === "karlsen" && <Dashboard status={status} rpcUrl={rpcUrl} settings={settings} />}
-        {tab === "miner" && <MinerPage />}
+        {tab === "miner" && <MinerPage rpcUrl={rpcUrl} nodeRunning={status?.state === "running"} />}
         {tab === "settings" && <SettingsPage status={status} onSaved={setSettings} />}
         {tab === "karlsend" && <LogConsole />}
         {walletMounted && (
