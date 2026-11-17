@@ -16,7 +16,7 @@
 # (solo mining with --node); src-tauri/src/miner.rs reads some of its output lines.
 set -euo pipefail
 
-MINER_VERSION="3.3.0"
+MINER_VERSION="3.3.1"
 
 cd "$(dirname "$0")/.."
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
@@ -26,14 +26,14 @@ case "$TRIPLE" in
   x86_64-*windows*)
     EXT=".exe"
     ARCHIVE="karlsenminer-v${MINER_VERSION}-windows.zip"
-    ARCHIVE_SHA256="79e036878ceaff3cdabe62a05da06d0fd11789fd0a9a4d379e668d0855af0773"
-    BIN_SHA256="11393f29ce01858d5ae2a8ce4e07f416fcd33849f7e95d1024678fb5cee560ac"
+    ARCHIVE_SHA256="7c0e6423e20484f163384be455a2aa610bc5da0f4b7a7cd182cf23e6ab4a4dd9"
+    BIN_SHA256="bde42858e7eb25453476f77bc2aaf307cb3b01c8ea9ea37b749b657ab50275c8"
     ;;
   x86_64-*linux*)
     EXT=""
     ARCHIVE="karlsenminer-v${MINER_VERSION}-linux.tar.gz"
-    ARCHIVE_SHA256="2019834c6f40d2643176c43741ba5cfb7cc340e66de5bbd9c26dd76a9e75cbe5"
-    BIN_SHA256="ff028297c66392976cf41942865360cf25f73c272e48f999c13ce49529ef06ed"
+    ARCHIVE_SHA256="143767267604bb8adf3b0fa06407f3ec6f5225770c4e1b5ae223af7308e07d94"
+    BIN_SHA256="74e78293a6f683e95ccaa40ff841058d82d5e94b41df855f1968b84d1a4d8940"
     ;;
   *)
     echo "No KarlsenMiner release for target $TRIPLE (Windows x64 and Linux x64 only)." >&2

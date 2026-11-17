@@ -29,7 +29,7 @@ use tauri_plugin_shell::ShellExt;
 use tokio::sync::{mpsc, watch, Mutex};
 
 /// Version of the bundled KarlsenMiner. Keep in sync with the pin in `scripts/fetch-miner.sh`.
-pub const MINER_VERSION: &str = "3.3.0";
+pub const MINER_VERSION: &str = "3.3.1";
 
 const MINER_SIDECAR: &str = "karlsenminer";
 
@@ -541,7 +541,7 @@ enum BlockOutcome {
     Rejected,
 }
 
-/// What one line of KarlsenMiner v3.3.0 output tells Desktop.
+/// What one line of KarlsenMiner (3.3.1) output tells Desktop.
 #[derive(Debug, Default, PartialEq)]
 struct MinerLine {
     hashrate_mhs: Option<f64>,
@@ -558,9 +558,9 @@ fn leading_number(s: &str) -> Option<(f64, &str)> {
     Some((value, &s[end..]))
 }
 
-/// Parse the lines Desktop reacts to (all printed by `karlsenminer --node`, v3.3.0):
+/// Parse the lines Desktop reacts to (all printed by `karlsenminer --node`, 3.3.1):
 /// the table's summary line, e.g.
-/// `Total: 58.37 MH/s (avg 58.12 MH/s) | A:1/R:0 | 0.375 | 156W | Best: 4.2G`,
+/// `Total: 58.37 MH/s (avg 58.12 MH/s) | A:1/R:0 | 0.375 | 156W | Best: 6,538,822,998`,
 /// the node-state messages, block results and `ERROR:` lines.
 /// Input must already be free of ANSI sequences.
 fn parse_miner_line(line: &str) -> MinerLine {
@@ -629,9 +629,9 @@ mod tests {
 
     #[test]
     fn parses_miner_summary_line() {
-        let line = "   Total: 58.37 MH/s (avg 58.12 MH/s) | A:1/R:0 | 0.375 | 156W | Best: 4.2G";
+        let line = "   Total: 173.29 MH/s (avg 173.31 MH/s) | A:7/R:0 | 0.421 | 412W | Best: 6,538,822,998";
         let info = parse_miner_line(line);
-        assert_eq!(info.hashrate_mhs, Some(58.37));
+        assert_eq!(info.hashrate_mhs, Some(173.29));
         assert_eq!((info.node, info.block, info.error.clone()), (None, None, None));
         assert_eq!(parse_miner_line("Total: 1.5 GH/s | A:0/R:0").hashrate_mhs, Some(1500.0));
         assert_eq!(parse_miner_line("Total: 950.00 KH/s (avg 0.00 H/s)").hashrate_mhs, Some(0.95));
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn follows_the_node_state() {
-        // Real lines of karlsenminer 3.3.0 --node (ANSI already stripped).
+        // Real lines of karlsenminer 3.3.x --node (ANSI already stripped).
         let node = |l: &str| parse_miner_line(l).node;
         assert_eq!(
             node("[2026-11-17 03:38:43] Node grpc://127.0.0.1:42520: karlsend 3.3.0 is still syncing - waiting; the GPUs start when it is synced"),
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(node("[..] The node is not synced yet - mining starts by itself when it is"), Some(NodeState::Waiting));
         assert_eq!(node("[..] Connection to the node lost"), Some(NodeState::Waiting));
         assert_eq!(node("[..] Node grpc://127.0.0.1:42110: karlsend 3.3.0 is synced"), Some(NodeState::Synced));
-        assert_eq!(node("[2026-11-17 03:42:38] Ready to mine - network difficulty 4.2G"), Some(NodeState::Mining));
+        assert_eq!(node("[2026-11-17 16:11:34] Ready to mine - network difficulty 6,538,822,998"), Some(NodeState::Mining));
         assert_eq!(node("[..] The node is synced - mining"), Some(NodeState::Mining));
     }
 
@@ -682,9 +682,10 @@ mod tests {
     fn counts_blocks() {
         let block = |l: &str| parse_miner_line(l).block;
         // "BLOCK FOUND" is only the candidate; the node's answer is what counts.
-        assert_eq!(block("[..] GPU 0: BLOCK FOUND b284d48d (network difficulty 4.2G)"), None);
+        assert_eq!(block("[..] GPU 2: BLOCK FOUND 21a4ffbc (network difficulty 6,538,822,998)"), None);
+        // Real line from the Mine4 mainnet test (2026-11-17).
         assert_eq!(
-            block("[2026-11-17 03:42:38] Block accepted by the node: b284d48d65e10a73 (blocks found: 1)"),
+            block("[2026-11-17 16:17:05] Block accepted by the node: 21a4ffbc3f37372568530684b949436b53d10e7c763ccc6bb91368ee8dfbf185 (blocks found: 8)"),
             Some(BlockOutcome::Accepted)
         );
         assert_eq!(block("[..] Block rejected by the node: b284d48d (BlockInvalid)"), Some(BlockOutcome::Rejected));
